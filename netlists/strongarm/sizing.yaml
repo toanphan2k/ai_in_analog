@@ -1,0 +1,82 @@
+geometry:
+  diffusion_length_um: 0.29
+
+optimization:
+  variables: [w_in, l_in, w_n, w_p, w_rst, w_tail, w_8, l_8]
+  bounds:
+    w_in: {min: 0.5, max: 40.0, scale: log}
+    l_in: {min: 0.15, max: 0.6, scale: log}
+    w_n: {min: 0.5, max: 40.0, scale: log}
+    w_p: {min: 0.5, max: 60.0, scale: log}
+    w_rst: {min: 0.5, max: 40.0, scale: log}
+    w_tail: {min: 0.5, max: 60.0, scale: log}
+    w_8: {min: 0.5, max: 40.0, scale: log}
+    l_8: {min: 0.15, max: 1.0, scale: log}
+
+parameters:
+  w_in: {spice_name: W_IN, required: true}
+  l_in: {spice_name: L_IN, required: true}
+  w_n: {spice_name: W_N, required: true}
+  l_n: {spice_name: L_N, default: 0.15}
+  w_p: {spice_name: W_P, required: true}
+  l_p: {spice_name: L_P, default: 0.15}
+  w_tail: {spice_name: W_TAIL, required: true}
+  w_8: {spice_name: W_EQ, required: true}
+  l_8: {spice_name: L_EQ, required: true}
+  w_rst: {spice_name: W_RST, required: true}
+  l_rst: {spice_name: L_RST, default: 0.15}
+
+groups:
+  input_pair:
+    devices: [XM1, XM2]
+    width: w_in
+    length: l_in
+  nmos_latch_pair:
+    devices: [XM3, XM4]
+    width: w_n
+    length: l_n
+  pmos_latch_pair:
+    devices: [XM5, XM6]
+    width: w_p
+    length: l_p
+  tail_switch:
+    devices: [XM7]
+    width: w_tail
+    length: l_n
+  equalizer:
+    devices: [XM8]
+    width: w_8
+    length: l_8
+  reset_pair:
+    devices: [XMr1, XMr2]
+    width: w_rst
+    length: l_rst
+
+analyses:
+  transient:
+    vdd_v: 1.8
+    period_s: 5.0e-10
+    power_window_s: [5.0e-9, 1.6e-8]
+    output_positive: "v(X)"
+    output_negative: "v(Y)"
+    clock_vector: "v(ck)"
+    power_vector: "p_inst"
+  gain:
+    enabled: true
+    source_overrides:
+      VCK: "VCK ck 0 1.8"
+      Vinp: "Vinp inp 0 DC 0.9 AC 0.5"
+      Vinn: "Vinn inn 0 DC 0.9 AC -0.5"
+    extra_devices:
+      - "LX X vdd 1e6"
+      - "LY Y vdd 1e6"
+    control:
+      - "set wr_singlescale"
+      - "set wr_vecnames"
+      - "op"
+      - "ac dec 25 1 1e11"
+    vectors: ["v(X)", "v(Y)", "v(inp)", "v(inn)"]
+    output_positive: "v(X)"
+    output_negative: "v(Y)"
+    input_positive: "v(inp)"
+    input_negative: "v(inn)"

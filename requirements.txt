@@ -1,0 +1,4 @@
+# Runtime dependency for candidate selection and tests for the AI sizing scaffold.
+numpy>=2.0
+PyYAML>=6
+pytest>=8.0
