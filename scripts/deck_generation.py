@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Mapping
 
 from scripts.netlist_tools import resize_netlist
@@ -14,6 +13,7 @@ def render_transient_deck(
     sizing_config: Mapping,
     waveform_name: str,
 ) -> str:
+    """Render a resized transient deck targeting the requested waveform filename."""
     deck = resize_netlist(template, sizes, sizing_config, literal_wl=True)
     pattern = re.compile(r"(?im)^(\s*wrdata\s+)\S+")
     deck, count = pattern.subn(lambda match: match.group(1) + waveform_name, deck)
@@ -28,6 +28,7 @@ def render_gain_deck(
     sizing_config: Mapping,
     waveform_name: str,
 ) -> str:
+    """Render an AC gain deck using the configured source and control overrides."""
     gain_config = sizing_config.get("analyses", {}).get("gain", {})
     if not gain_config.get("enabled", False):
         raise ValueError("the sizing config does not enable gain analysis")

@@ -56,6 +56,7 @@ def extract_delay(
     power_from_s: float | None = None,
     power_to_s: float | None = None,
 ) -> dict:
+    """Extract worst-case transient decision delay and optional average power."""
     if vdd <= 0 or period_s <= 0:
         raise ValueError("vdd and period_s must be positive")
     vectors, time = _read_waveform(waveform)
@@ -118,6 +119,7 @@ def extract_delay(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse waveform measurement options and print extracted delay metrics."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("waveform", type=Path)
     parser.add_argument("--vdd", type=float, required=True)

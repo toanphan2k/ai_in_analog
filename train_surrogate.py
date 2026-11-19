@@ -22,7 +22,9 @@ def _read_rows(path: Path) -> list[dict]:
         try:
             import pandas as pd
         except ImportError as exc:
-            raise RuntimeError("Parquet input requires pandas and a parquet engine such as pyarrow") from exc
+            raise RuntimeError(
+                "Parquet input requires pandas and a parquet engine such as pyarrow"
+            ) from exc
         return pd.read_parquet(path).to_dict(orient="records")
     with path.open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
@@ -91,7 +93,9 @@ def _load_training_dependencies():
         from sklearn.model_selection import train_test_split
         from sklearn.preprocessing import StandardScaler
     except ImportError as exc:
-        raise RuntimeError("Training requires scikit-learn; install project requirements first") from exc
+        raise RuntimeError(
+            "Training requires scikit-learn; install project requirements first"
+        ) from exc
     return accuracy_score, mean_absolute_error, r2_score, train_test_split, StandardScaler
 
 
@@ -106,6 +110,7 @@ def train(
     target_transform: str,
     include_partial: bool = False,
 ) -> dict:
+    """Fit per-target surrogates, evaluate held-out metrics, and save artifacts."""
     accuracy_score, mean_absolute_error, r2_score, train_test_split, StandardScaler = (
         _load_training_dependencies()
     )
@@ -171,7 +176,10 @@ def train(
         labels = np.asarray([row.get("status") == "evaluated" for row in usable_rows], dtype=int)
         classifier_scaler = StandardScaler().fit(x_all[train_indices])
         if len(np.unique(labels[train_indices])) < 2:
-            classifier = DummyClassifier(strategy="constant", constant=int(labels[train_indices][0]))
+            classifier = DummyClassifier(
+                strategy="constant",
+                constant=int(labels[train_indices][0]),
+            )
         else:
             classifier = RandomForestClassifier(
                 n_estimators=200, class_weight="balanced", random_state=seed
@@ -200,7 +208,9 @@ def train(
             raise ValueError(f"target {target!r} must be positive for log-standard scaling")
         transform_values = np.log(y) if target_transform == "log-standard" else y
         position_by_index = {int(index): position for position, index in enumerate(valid_indices)}
-        y_train_raw = np.asarray([transform_values[position_by_index[int(i)]] for i in target_train])
+        y_train_raw = np.asarray(
+            [transform_values[position_by_index[int(index)]] for index in target_train]
+        )
         y_test_raw = np.asarray([transform_values[position_by_index[int(i)]] for i in target_test])
 
         x_scaler = StandardScaler().fit(x_all[target_train])
@@ -300,15 +310,21 @@ def train(
     try:
         import joblib
     except ImportError as exc:
-        raise RuntimeError("Saving models requires joblib, normally installed with scikit-learn") from exc
+        raise RuntimeError(
+            "Saving models requires joblib, normally installed with scikit-learn"
+        ) from exc
     output.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(artifacts, output)
     evaluation_path = output.with_name(output.stem + "_evaluation.json")
-    evaluation_path.write_text(json.dumps(evaluation, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    evaluation_path.write_text(
+        json.dumps(evaluation, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
     return evaluation
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse training options and report held-out surrogate performance."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, help="input CSV or Parquet dataset")
     parser.add_argument(
@@ -316,11 +332,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=("gpr", "lightgbm", "catboost", "mlp", "two-stage"),
         default="gpr",
     )
-    parser.add_argument("--targets", default="delay_s,power_w", help="comma-separated metric columns")
+    parser.add_argument(
+        "--targets",
+        default="delay_s,power_w",
+        help="comma-separated metric columns",
+    )
     parser.add_argument("--output", default="model.pkl")
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--target-transform", choices=("standard", "log-standard", "none"), default="log-standard")
+    parser.add_argument(
+        "--target-transform",
+        choices=("standard", "log-standard", "none"),
+        default="log-standard",
+    )
     parser.add_argument(
         "--include-partial",
         action="store_true",

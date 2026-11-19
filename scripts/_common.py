@@ -14,6 +14,7 @@ if str(PROJECT_DIR) not in sys.path:
 
 
 def load_config(path: str | Path = SIZING_CONFIG) -> dict:
+    """Load a YAML mapping from the requested configuration file."""
     import yaml
 
     config = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
@@ -23,6 +24,7 @@ def load_config(path: str | Path = SIZING_CONFIG) -> dict:
 
 
 def write_json(path: str | Path, values: Mapping) -> None:
+    """Write a mapping as readable UTF-8 JSON, creating parent directories."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(dict(values), indent=2, sort_keys=True) + "\n", encoding="utf-8")

@@ -14,6 +14,7 @@ from scripts._common import write_json
 
 
 def extract_offset(csv_path: str | Path, column: str = "vos") -> dict:
+    """Summarize valid offset samples with mean, sigma, and range statistics."""
     values = []
     with Path(csv_path).open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
@@ -44,6 +45,7 @@ def extract_offset(csv_path: str | Path, column: str = "vos") -> dict:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse offset CSV options and print the resulting summary."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv_file", type=Path)
     parser.add_argument("--column", default="vos")

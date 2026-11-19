@@ -11,7 +11,8 @@ import yaml
 
 
 def load_sizing_config(path: str | Path) -> dict:
-    config = yaml.safe_load(Path(path).read_text())
+    """Load and validate the parameter/group mappings from a sizing YAML file."""
+    config = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         raise ValueError(f"sizing config must contain a YAML mapping: {path}")
     if not isinstance(config.get("parameters"), dict) or not isinstance(config.get("groups"), dict):
@@ -20,6 +21,7 @@ def load_sizing_config(path: str | Path) -> dict:
 
 
 def fmt_um(value: float) -> str:
+    """Format a positive W/L value in micrometres for a SPICE deck."""
     value = float(value)
     if not 0 < value < 1e6:
         raise ValueError(f"W/L must be positive and in micrometres: {value}")
@@ -27,6 +29,7 @@ def fmt_um(value: float) -> str:
 
 
 def fmt_geometry(width_um: float, diff_len_um: float) -> Dict[str, float]:
+    """Compute source/drain diffusion area and perimeter in square micrometres."""
     area = width_um * diff_len_um
     perimeter = 2.0 * (width_um + diff_len_um)
     return {"AD": area, "AS": area, "PD": perimeter, "PS": perimeter}
@@ -160,6 +163,7 @@ def resize_netlist(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse netlist-resizing options and write the rendered SPICE deck."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--template", required=True)
     parser.add_argument("--sizing-config", required=True)
@@ -180,7 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--sizes must be a JSON object")
 
     rendered = resize_netlist(
-        template_path.read_text(),
+        template_path.read_text(encoding="utf-8"),
         sizes,
         load_sizing_config(args.sizing_config),
         literal_wl=args.literal_wl,
@@ -192,7 +196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             rendered,
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(rendered)
+    output_path.write_text(rendered, encoding="utf-8")
     print(output_path)
     return 0
 

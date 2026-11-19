@@ -8,21 +8,24 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Sequence
 
 
 class NgspiceRun:
+    """Construct and optionally execute an ngspice batch command."""
+
     def __init__(self, ngspice_bin: str = "ngspice", timeout_s: float = 120.0):
         self.ngspice_bin = ngspice_bin
         self.timeout_s = timeout_s
 
     def command(self, deck: str | Path, workdir: str | Path) -> list[str]:
+        """Build the batch command that writes simulator output to the work directory."""
         deck = Path(deck)
         workdir = Path(workdir)
         return [self.ngspice_bin, "-b", "-o", str(workdir / "ngspice.log"), str(deck)]
 
     def run(self, deck: str | Path, workdir: str | Path,
             *, execute: bool = False) -> dict:
+        """Return the command description or execute ngspice and capture its output."""
         deck = Path(deck)
         workdir = Path(workdir)
         workdir.mkdir(parents=True, exist_ok=True)
@@ -42,6 +45,7 @@ class NgspiceRun:
             stderr=subprocess.STDOUT,
             timeout=self.timeout_s,
             text=True,
+            check=False,
         )
         result.update(
             executed=True,

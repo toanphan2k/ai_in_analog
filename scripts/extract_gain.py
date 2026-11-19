@@ -28,13 +28,14 @@ def extract_gain(
     input_positive: str = "v(inp)",
     input_negative: str = "v(inn)",
 ) -> dict:
+    """Compute differential DC/peak gain and interpolated -3 dB bandwidth."""
     frequency, vectors = parse_ac(waveform)
     output_diff = _vector(vectors, output_positive) - _vector(vectors, output_negative)
     input_diff = _vector(vectors, input_positive) - _vector(vectors, input_negative)
     if np.any(np.abs(input_diff) == 0):
         raise ValueError("input differential AC stimulus contains zero magnitude")
     gain = np.abs(output_diff / input_diff)
-    if not len(gain) or not np.isfinite(gain).all():
+    if gain.size == 0 or not np.isfinite(gain).all():
         raise ValueError("AC gain contains no finite samples")
 
     dc_gain = float(gain[0])
@@ -63,6 +64,7 @@ def extract_gain(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse AC waveform options and print extracted gain metrics."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("waveform", type=Path)
     parser.add_argument("--output", type=Path)

@@ -7,6 +7,8 @@ from typing import Dict
 
 @dataclass(frozen=True)
 class StrongArmMetrics:
+    """Measured StrongARM performance metrics in SI units."""
+
     delay_s: float
     power_w: float
     input_referred_offset_v: float
@@ -17,6 +19,7 @@ class StrongArmMetrics:
     output: Dict[str, float] | None = None
 
     def as_dict(self) -> Dict[str, float]:
+        """Return serializable scalar metrics, excluding optional raw output data."""
         row = asdict(self)
         row.pop("output", None)
         return row

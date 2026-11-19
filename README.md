@@ -33,6 +33,21 @@ python3 optimize_sizing.py \
   --seed 0
 ```
 
+## Code Quality
+
+Install the development linters into the project environment and run them across all
+Python entry points and packages:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+flake8 collect_data.py optimize_sizing.py train_surrogate.py src runner scripts
+pylint collect_data.py optimize_sizing.py train_surrogate.py src runner scripts --score=n
+```
+
+Flake8 and Pylint use the repository `.flake8` and `.pylintrc` settings. In VS Code,
+select `.venv/bin/python` on Linux/WSL or `.venv\Scripts\python.exe` on Windows for
+Pylance so optional and runtime imports resolve against the project environment.
+
 ## Collect and train
 
 Collect a space-filling dataset by running the same configured SPICE analyses used by

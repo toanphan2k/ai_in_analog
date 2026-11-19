@@ -21,6 +21,7 @@ def run_analysis(
     ngspice_bin: str = "ngspice",
     timeout_s: float = 120.0,
 ) -> dict:
+    """Run or describe one named analysis deck in its build directory."""
     if analysis not in ANALYSES:
         raise ValueError(f"unsupported analysis {analysis!r}; choose from {ANALYSES}")
     deck = Path(deck).resolve()
@@ -38,6 +39,7 @@ def run_analysis(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse runner options and print the resulting command or execution record."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("analysis", choices=ANALYSES)
     parser.add_argument("deck", type=Path)

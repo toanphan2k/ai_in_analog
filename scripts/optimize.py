@@ -38,6 +38,7 @@ def propose(
     pool_size: int = 256,
     seed: int = 0,
 ) -> dict:
+    """Propose the best candidate from a sampled pool using recorded observations."""
     names = variable_names(sizing_config)
     bounds = sizing_config["optimization"].get("bounds", {})
     if any(name not in bounds for name in names):
@@ -80,6 +81,7 @@ def propose(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse proposal options and print the next normalized sizing candidate."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=SIZING_CONFIG)
     parser.add_argument("--results", type=Path)

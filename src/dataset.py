@@ -7,6 +7,7 @@ from typing import Iterable, Mapping
 
 
 def append_rows(path: str | Path, rows: Iterable[Mapping]) -> int:
+    """Append mappings as JSON Lines and return the number of records written."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
@@ -18,6 +19,7 @@ def append_rows(path: str | Path, rows: Iterable[Mapping]) -> int:
 
 
 def read_rows(path: str | Path) -> list[dict]:
+    """Read JSON Lines records, returning an empty list when the file is absent."""
     path = Path(path)
     if not path.exists():
         return []

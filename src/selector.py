@@ -32,6 +32,7 @@ def variable_names(sizing_config: Mapping) -> tuple[str, ...]:
 
 
 def halton(index: int, base: int) -> float:
+    """Return the radical-inverse value for one Halton sequence dimension."""
     value = 0.0
     factor = 1.0 / base
     while index:
@@ -42,6 +43,7 @@ def halton(index: int, base: int) -> float:
 
 
 def _prime_bases(count: int) -> list[int]:
+    """Return the first ``count`` prime numbers for Halton dimensions."""
     primes: list[int] = []
     candidate = 2
     while len(primes) < count:
@@ -56,6 +58,7 @@ def candidate_pool(
     sizing_config: Mapping,
     seed: int = 0,
 ) -> np.ndarray:
+    """Generate seeded Halton candidates in the normalized sizing domain."""
     if count <= 0:
         raise ValueError("candidate count must be positive")
     dimension = len(variable_names(sizing_config))
@@ -71,6 +74,7 @@ def candidate_pool(
 
 def select_next(candidates: np.ndarray, observed_x: np.ndarray | None,
                 observed_y: np.ndarray | None, kappa: float = 1.0) -> np.ndarray:
+    """Select the lowest ridge-regression estimate with a simple uncertainty bonus."""
     candidates = np.asarray(candidates, dtype=float)
     if observed_x is None or observed_y is None or len(observed_x) == 0:
         return candidates[0]
