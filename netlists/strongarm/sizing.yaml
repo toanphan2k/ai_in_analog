@@ -3,6 +3,7 @@ geometry:
 
 optimization:
   variables: [w_in, l_in, w_n, w_p, w_rst, w_tail, w_8, l_8]
+  derived_features: [w_over_l, w_times_l]
   bounds:
     w_in: {min: 0.5, max: 40.0, scale: log}
     l_in: {min: 0.15, max: 0.6, scale: log}

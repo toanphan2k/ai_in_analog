@@ -15,13 +15,14 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 import numpy as np
+from scipy.stats import qmc
 
 PROJECT_DIR = Path(__file__).resolve().parent
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from runner.ngspice_runner import NgspiceRun  # noqa: E402
-from scripts._common import load_config  # noqa: E402
+from runner.mock_runner import MockRunner  # noqa: E402
 from scripts.deck_generation import (  # noqa: E402
     render_gain_deck,
     render_transient_deck,
@@ -29,7 +30,7 @@ from scripts.deck_generation import (  # noqa: E402
 from scripts.extract_delay import extract_delay  # noqa: E402
 from scripts.extract_gain import extract_gain  # noqa: E402
 from scripts.netlist_tools import load_sizing_config  # noqa: E402
-from scripts.waveform_io import load_transient  # noqa: E402
+from optimize_nrbo import optimize_candidates  # noqa: E402
 from src.selector import candidate_pool, variable_names  # noqa: E402
 
 
@@ -50,9 +51,16 @@ CSV_COLUMNS = (
     "peak_gain_v_per_v",
     "peak_gain_frequency_hz",
     "bandwidth_3db_hz",
+    "surrogate_delay_s",
+    "surrogate_power_w",
+    "delay_abs_error_s",
+    "power_abs_error_w",
+    "delay_ape_percent",
+    "power_ape_percent",
     "samples",
     "error",
 )
+RUN_CHECKPOINT_INTERVAL = 25
 
 
 def _configure_logging(verbosity: int) -> None:
@@ -89,9 +97,9 @@ def _resolve_netlist_dir(value: str | Path) -> Path:
     return path
 
 
-def _default_run_id(netlist_dir: Path) -> str:
+def _default_run_id() -> str:
     time_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
-    return f"{netlist_dir.name}_{time_id}"
+    return time_id
 
 
 def _physical_sizes(config: Mapping, vector: Sequence[float]) -> dict[str, float]:
@@ -115,6 +123,24 @@ def _physical_sizes(config: Mapping, vector: Sequence[float]) -> dict[str, float
             value = low + float(normalized) * (high - low)
         sizes[name] = float(value)
     return sizes
+
+
+def _normalized_vector(config: Mapping, sizes: Mapping[str, float]) -> np.ndarray:
+    names = variable_names(config)
+    bounds = config.get("optimization", {}).get("bounds", {})
+    if set(sizes) != set(names):
+        raise ValueError("candidate sizing keys must exactly match optimization.variables")
+    values = []
+    for name in names:
+        low, high = float(bounds[name]["min"]), float(bounds[name]["max"])
+        value = float(sizes[name])
+        if not low <= value <= high:
+            raise ValueError(f"candidate {name}={value} is outside [{low}, {high}]")
+        if bounds[name].get("scale", "linear") == "log":
+            values.append(math.log(value / low) / math.log(high / low))
+        else:
+            values.append((value - low) / (high - low))
+    return np.asarray(values, dtype=float)
 
 
 def _atomic_json(path: Path, payload: Mapping) -> None:
@@ -141,6 +167,27 @@ def _write_csv(path: Path, samples: list[dict]) -> None:
                     "error": sample.get("error", ""),
                 }
             )
+
+
+def _sample_vectors(
+    algorithm: str,
+    count: int,
+    sizing_config: Mapping,
+    seed: int,
+) -> np.ndarray:
+    dimension = len(variable_names(sizing_config))
+    if algorithm == "halton":
+        return candidate_pool(count, sizing_config, seed)
+    if algorithm == "random":
+        return np.random.default_rng(seed).random((count, dimension))
+    if algorithm == "lhs":
+        rng = np.random.default_rng(seed)
+        strata = (np.arange(count)[:, None] + rng.random((count, dimension))) / count
+        return np.column_stack([rng.permutation(strata[:, axis]) for axis in range(dimension)])
+    if algorithm == "sobol":
+        power = int(math.ceil(math.log2(count)))
+        return qmc.Sobol(d=dimension, scramble=True, seed=seed).random_base2(power)[:count]
+    raise ValueError(f"unsupported sampling algorithm {algorithm!r}")
 
 
 def _run_deck(runner: NgspiceRun, deck_path: Path, workdir: Path, waveform: Path) -> None:
@@ -170,7 +217,7 @@ def _evaluate_sample(
     run_name: str,
     template: str,
     sizing_config: Mapping,
-    runner: NgspiceRun,
+    runner: NgspiceRun | MockRunner,
     run_dir: Path,
 ) -> dict:
     sample_name = f"{run_name}_{index:03d}"
@@ -192,6 +239,19 @@ def _evaluate_sample(
 
     analysis_config = sizing_config.get("analyses", {})
     transient_config = analysis_config.get("transient", {})
+    if isinstance(runner, MockRunner):
+        mock_result = runner.evaluate(
+            sizes,
+            np.asarray(vector, dtype=float),
+            sample_index=index,
+            vdd_v=float(transient_config.get("vdd_v", 1.8)),
+        )
+        record.update(mock_result)
+        record.update(record["metrics"])
+        _atomic_json(sample_dir / "result.json", record)
+        LOGGER.info("Mock sample %s status: %s", sample_name, record["status"])
+        return record
+
     delay_dir = sample_dir / "delay"
     delay_dir.mkdir()
     transient_file = "transient.txt"
@@ -274,15 +334,50 @@ def optimize(
     samples: int = 10,
     seed: int = 0,
     algorithm: str = "halton",
+    model_path: str | Path | None = None,
+    objective: str | None = None,
+    maximize_objective: bool = False,
+    delay_weight: float = 1.0,
+    speed_weight: float = 0.0,
+    power_weight: float = 0.0,
+    max_power_w: float | None = None,
+    candidates_path: str | Path | None = None,
+    min_valid_probability: float = 0.5,
+    neighbors_per_candidate: int = 0,
+    neighbor_radius: float = 0.02,
+    iterations: int = 60,
+    population_size: int = 24,
+    mock_failure_rate: float = 0.03,
     run_id: str | None = None,
     timeout_s: float = 120.0,
 ) -> Path:
-    if runner_name != "ngspice":
-        raise ValueError(f"unsupported runner {runner_name!r}; available: ngspice")
+    """Sample, optimize against a surrogate, or verify selected designs with SPICE."""
+    if runner_name not in {"ngspice", "mock"}:
+        raise ValueError(f"unsupported runner {runner_name!r}; available: ngspice, mock")
+    if not 0.0 <= mock_failure_rate < 1.0:
+        raise ValueError("mock_failure_rate must be in [0, 1)")
     if samples <= 0:
         raise ValueError("samples must be positive")
-    if algorithm not in {"halton", "random"}:
-        raise ValueError("algorithm must be 'halton' or 'random'")
+    if algorithm not in {"halton", "random", "lhs", "sobol", "nrbo", "verify"}:
+        raise ValueError("algorithm must be halton, random, lhs, sobol, nrbo, or verify")
+    if algorithm == "nrbo" and model_path is None:
+        raise ValueError("--model is required when --algorithm nrbo")
+    if algorithm != "nrbo" and model_path is not None:
+        raise ValueError("--model can only be used with --algorithm nrbo")
+    if algorithm == "verify" and candidates_path is None:
+        raise ValueError("--candidates is required when --algorithm verify")
+    if algorithm != "verify" and candidates_path is not None:
+        raise ValueError("--candidates can only be used with --algorithm verify")
+    if neighbors_per_candidate < 0:
+        raise ValueError("neighbors_per_candidate must be nonnegative")
+    if neighbors_per_candidate and neighbor_radius <= 0:
+        raise ValueError("neighbor_radius must be positive when generating neighbors")
+    if max_power_w is not None and (not math.isfinite(max_power_w) or max_power_w <= 0):
+        raise ValueError("max_power_w must be positive")
+    if not math.isfinite(delay_weight) or not math.isfinite(power_weight):
+        raise ValueError("objective weights must be finite")
+    if not math.isfinite(neighbor_radius) or neighbor_radius < 0:
+        raise ValueError("neighbor_radius must be finite and nonnegative")
 
     netlist_dir = _resolve_netlist_dir(netlist)
     template_path = netlist_dir / "netlist.spice"
@@ -294,20 +389,122 @@ def optimize(
     sizing_config = load_sizing_config(config_path)
     template = template_path.read_text(encoding="utf-8")
     variable_names(sizing_config)
-    run_id = run_id if run_id is not None else _default_run_id(netlist_dir)
+    run_id = run_id if run_id is not None else _default_run_id()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", run_id):
         raise ValueError("run-id may contain only letters, digits, dot, underscore, and hyphen")
     run_name = f"run_{run_id}"
-    run_dir = (PROJECT_DIR / "run" / run_id).resolve()
+    run_dir = (PROJECT_DIR / "run" / netlist_dir.name / run_id).resolve()
     if run_dir.exists() and any(run_dir.iterdir()):
         raise FileExistsError(f"run directory is not empty: {run_dir}; choose another --run-id")
     run_dir.mkdir(parents=True, exist_ok=True)
+    if algorithm == "nrbo":
+        import joblib
+
+        model_file = Path(model_path)
+        if not model_file.is_absolute():
+            model_file = PROJECT_DIR / model_file
+        if not model_file.is_file():
+            raise FileNotFoundError(f"model file does not exist: {model_file}")
+        model = joblib.load(model_file)
+        candidates = optimize_candidates(
+            model,
+            sizing_config,
+            objective=objective,
+            maximize_objective=maximize_objective,
+            delay_weight=delay_weight,
+            speed_weight=speed_weight,
+            power_weight=power_weight,
+            top_k=samples,
+            seed=seed,
+            iterations=iterations,
+            population_size=population_size,
+            max_power_w=max_power_w,
+            min_valid_probability=min_valid_probability,
+        )
+        payload = {
+            "algorithm": "nrbo",
+            "model": str(model_file.resolve()),
+            "objective": objective,
+            "maximize_objective": maximize_objective,
+            "delay_weight": delay_weight,
+            "speed_weight": speed_weight,
+            "power_weight": power_weight,
+            "max_power_w": max_power_w,
+            "candidates": candidates,
+            "note": "Surrogate predictions only; candidates require final SPICE verification.",
+        }
+        _atomic_json(run_dir / "candidates.json", payload)
+        with (run_dir / "candidates.csv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=(
+                    "rank",
+                    "objective",
+                    "score",
+                    "feasible",
+                    "size_json",
+                    "predictions_json",
+                ),
+            )
+            writer.writeheader()
+            for rank, candidate in enumerate(candidates, start=1):
+                writer.writerow(
+                    {
+                        "rank": rank,
+                        "objective": candidate["objective"],
+                        "score": candidate["score"],
+                        "feasible": candidate["feasible"],
+                        "size_json": json.dumps(candidate["size"], sort_keys=True),
+                        "predictions_json": json.dumps(candidate["predictions"], sort_keys=True),
+                    }
+                )
+        LOGGER.info("NRBO proposed %d candidates; results=%s", len(candidates), run_dir)
+        return run_dir
+
+    verification_predictions: dict[tuple[float, ...], Mapping] = {}
+    if algorithm == "verify":
+        candidate_file = Path(candidates_path)
+        if not candidate_file.is_absolute():
+            candidate_file = PROJECT_DIR / candidate_file
+        candidate_payload = json.loads(candidate_file.read_text(encoding="utf-8"))
+        raw_candidates = candidate_payload.get("candidates", [])
+        if not raw_candidates:
+            raise ValueError(f"candidate file contains no candidates: {candidate_file}")
+        designs = []
+        seen_sizes = set()
+        neighbor_random = np.random.default_rng(seed)
+        for candidate in raw_candidates:
+            sizes = candidate.get("size")
+            if not isinstance(sizes, Mapping):
+                raise ValueError("each candidate must contain a 'size' mapping")
+            vector = _normalized_vector(sizing_config, sizes)
+            signature = tuple(round(float(value), 12) for value in vector)
+            if isinstance(candidate.get("predictions"), Mapping):
+                verification_predictions[signature] = candidate["predictions"]
+            if signature not in seen_sizes:
+                designs.append((vector, dict(sizes)))
+                seen_sizes.add(signature)
+            for _ in range(neighbors_per_candidate):
+                neighbor = np.clip(
+                    vector + neighbor_random.normal(0.0, neighbor_radius, len(vector)),
+                    0.0,
+                    1.0,
+                )
+                signature = tuple(round(float(value), 12) for value in neighbor)
+                if signature not in seen_sizes:
+                    designs.append((neighbor, _physical_sizes(sizing_config, neighbor)))
+                    seen_sizes.add(signature)
+    else:
+        vectors = _sample_vectors(algorithm, samples, sizing_config, seed)
+        designs = [(vector, _physical_sizes(sizing_config, vector)) for vector in vectors]
+    sample_count = len(designs)
+
     LOGGER.info(
         "Starting %s: runner=%s, netlist=%s, samples=%d, algorithm=%s, seed=%d",
         run_name,
         runner_name,
         netlist_dir,
-        samples,
+        sample_count,
         algorithm,
         seed,
     )
@@ -315,30 +512,26 @@ def optimize(
     LOGGER.debug("Output directory: %s", run_dir)
     LOGGER.log(TRACE_LEVEL, "Sizing configuration:\n%s", json.dumps(sizing_config, indent=2))
 
-    if algorithm == "halton":
-        vectors = candidate_pool(samples, sizing_config, seed=seed)
-    else:
-        vectors = np.random.default_rng(seed).random(
-            (samples, len(variable_names(sizing_config)))
-        )
-
     metadata = {
         "name": run_name,
         "runner": runner_name,
         "netlist": str(netlist_dir),
         "algorithm": algorithm,
         "seed": seed,
-        "requested_samples": samples,
+        "requested_samples": sample_count,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "status": "running",
         "samples": [],
     }
     _atomic_json(run_dir / "results.json", metadata)
     (run_dir / "sizing.yaml").write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
-    runner = NgspiceRun(timeout_s=timeout_s)
+    runner = (
+        MockRunner(seed=seed, failure_rate=mock_failure_rate)
+        if runner_name == "mock"
+        else NgspiceRun(timeout_s=timeout_s)
+    )
 
-    for index, vector in enumerate(vectors, start=1):
-        sizes = _physical_sizes(sizing_config, vector)
+    for index, (vector, sizes) in enumerate(designs, start=1):
         try:
             record = _evaluate_sample(
                 index,
@@ -366,17 +559,43 @@ def optimize(
             }
             record.update(record["metrics"])
             _atomic_json(sample_dir / "result.json", record)
+        signature = tuple(round(float(value), 12) for value in vector)
+        predicted_metrics = verification_predictions.get(signature, {})
+        for target, predicted_key, absolute_key, percent_key in (
+            ("delay_s", "surrogate_delay_s", "delay_abs_error_s", "delay_ape_percent"),
+            ("power_w", "surrogate_power_w", "power_abs_error_w", "power_ape_percent"),
+        ):
+            predicted_value = predicted_metrics.get(target)
+            measured_value = record.get("metrics", {}).get(target)
+            if predicted_value is not None:
+                record["metrics"][predicted_key] = float(predicted_value)
+            if predicted_value is not None and measured_value is not None:
+                absolute_error = abs(float(predicted_value) - float(measured_value))
+                record["metrics"][absolute_key] = absolute_error
+                if float(measured_value) != 0:
+                    record["metrics"][percent_key] = (
+                        100.0 * absolute_error / abs(float(measured_value))
+                    )
+        record.update(record["metrics"])
+        _atomic_json(run_dir / f"sample_{index:03d}" / "result.json", record)
         metadata["samples"].append(record)
-        _write_csv(run_dir / "results.csv", metadata["samples"])
         metadata["completed_samples"] = len(metadata["samples"])
         metadata["status"] = (
             "complete"
-            if len(metadata["samples"]) == samples
+            if len(metadata["samples"]) == sample_count
             and all(sample["status"] == "evaluated" for sample in metadata["samples"])
             else "partial"
         )
-        LOGGER.info("Progress: %d/%d samples; latest status=%s", index, samples, record["status"])
-        _atomic_json(run_dir / "results.json", metadata)
+        if index % RUN_CHECKPOINT_INTERVAL == 0:
+            _write_csv(run_dir / "results.csv", metadata["samples"])
+            _atomic_json(run_dir / "results.json", metadata)
+        LOGGER.info(
+            "Progress: %d/%d samples; latest status=%s",
+            index,
+            sample_count,
+            record["status"],
+        )
+    _write_csv(run_dir / "results.csv", metadata["samples"])
     metadata["completed_at"] = datetime.now(timezone.utc).isoformat()
     _atomic_json(run_dir / "results.json", metadata)
     evaluated = sum(sample["status"] == "evaluated" for sample in metadata["samples"])
@@ -384,7 +603,7 @@ def optimize(
         "Finished %s: %d/%d fully evaluated; status=%s; results=%s",
         run_name,
         evaluated,
-        samples,
+        sample_count,
         metadata["status"],
         run_dir,
     )
@@ -392,15 +611,47 @@ def optimize(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse command-line options and run the selected sizing workflow."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--runner", default="ngspice", choices=("ngspice",))
-    parser.add_argument("--netlist", required=True, help="directory with netlist.spice and sizing.yaml")
+    parser.add_argument("--runner", default="ngspice", choices=("ngspice", "mock"))
+    parser.add_argument(
+        "--netlist",
+        required=True,
+        help="directory with netlist.spice and sizing.yaml",
+    )
     parser.add_argument("--samples", "--combinations", type=int, default=10)
-    parser.add_argument("--algorithm", choices=("halton", "random"), default="halton")
+    parser.add_argument(
+        "--algorithm",
+        choices=("halton", "random", "lhs", "sobol", "nrbo", "verify"),
+        default="halton",
+    )
+    parser.add_argument(
+        "--model",
+        help="trained joblib model artifact; required for --algorithm nrbo",
+    )
+    parser.add_argument("--candidates", help="candidate JSON required for --algorithm verify")
+    parser.add_argument("--objective", help="optional single predicted metric to minimize")
+    parser.add_argument("--maximize-objective", action="store_true")
+    parser.add_argument("--delay-weight", type=float, default=1.0)
+    parser.add_argument("--speed-weight", type=float, default=0.0)
+    parser.add_argument("--power-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--max-power-w",
+        type=float,
+        help="optional predicted power constraint for NRBO mode",
+    )
+    parser.add_argument("--min-valid-probability", type=float, default=0.5)
+    parser.add_argument("--iterations", type=int, default=60, help="NRBO search iterations")
+    parser.add_argument(
+        "--population-size", type=int, default=24, help="NRBO search population size"
+    )
+    parser.add_argument("--neighbors-per-candidate", type=int, default=0)
+    parser.add_argument("--neighbor-radius", type=float, default=0.02)
+    parser.add_argument("--mock-failure-rate", type=float, default=0.03)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--run-id",
-        help="output under run/<run-id>; default: <netlist-name>_<UTC-time-id>",
+        help="output under run/<netlist-name>/<run-id>; default run-id is a UTC timestamp",
     )
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument(
@@ -419,6 +670,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         samples=args.samples,
         seed=args.seed,
         algorithm=args.algorithm,
+        model_path=args.model,
+        objective=args.objective,
+        maximize_objective=args.maximize_objective,
+        delay_weight=args.delay_weight,
+        speed_weight=args.speed_weight,
+        power_weight=args.power_weight,
+        max_power_w=args.max_power_w,
+        candidates_path=args.candidates,
+        min_valid_probability=args.min_valid_probability,
+        neighbors_per_candidate=args.neighbors_per_candidate,
+        neighbor_radius=args.neighbor_radius,
+        iterations=args.iterations,
+        population_size=args.population_size,
+        mock_failure_rate=args.mock_failure_rate,
         run_id=args.run_id,
         timeout_s=args.timeout_s,
     )

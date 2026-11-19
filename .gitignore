@@ -1,3 +1,6 @@
 *__pycache__
 /.venv/
 /run/
+catboost_info
+dataset/*.csv
+dataset/*/

@@ -1,4 +1,10 @@
 # Runtime dependency for candidate selection and tests for the AI sizing scaffold.
 numpy>=2.0
+scipy>=1.11
 PyYAML>=6
+scikit-learn>=1.4
 pytest>=8.0
+lightgbm>=4.0
+catboost>=1.2
+
+# Optional Parquet support: pandas>=2.0 and pyarrow>=14.0

@@ -1,15 +1,12 @@
 # Dataset
 
-Append evaluated records here as JSON Lines. The store is intentionally excluded from
-the selector: call `src/dataset.py` helpers and pass arrays to `src/selector.py`.
+`collect_data.py` writes the training set to `data.csv` by default, or to Parquet when
+the output filename ends in `.parquet`. Each row includes raw sizing variables, derived
+per-group W/L and W*L features, metric targets, run identity, status, and quality labels.
+Failed and partial rows are retained for analysis; regression excludes them by default.
+A two-stage model can use their status labels for validity classification.
 
-Recommended fields:
-
-- `x_norm`: eight normalized W/L variables
-- `w_in`, `l_in`, `w_n`, `w_p`, `w_rst`, `w_tail`, `w_8`, `l_8`
-- `delay_s`
-- `power_w`
-- `input_referred_offset_v`
-- `kickback_noise_v`
-- `output_swing_v`
-- `fmax_hz`
+After candidate verification, append the SPICE results with `collect_data.py --from-results
+run/<verify-run-id>/results.json --append` and retrain. The JSONL helpers in
+`src/dataset.py` remain available for other append-only workflows but are not the default
+format used by the collection CLI.

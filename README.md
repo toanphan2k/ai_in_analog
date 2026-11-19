@@ -8,13 +8,17 @@ ai_in_analog/
   src/                 candidate selection and dataset/AI logic only
   scripts/             parameter parsing, deck generation, and metric extraction
   runner/              simulator adapters
-  optimize_sizing.py   generic sizing and evaluation entry point
-  run/<run-id>/        generated decks, simulator output, CSV, and JSON
+  collect_data.py     space-filling SPICE dataset collection
+  train_surrogate.py  surrogate model training and evaluation
+  optimize_sizing.py  generic sizing and evaluation entry point
+  run/<design>/<run-id>/ generated decks, simulator output, CSV, and JSON
+  dataset/<design>/     collected CSV or Parquet datasets
 ```
 
-Each design folder supplies its sizing variable names and ranges, transistor groups,
-SPICE `.param` mapping, and enabled analyses in `sizing.yaml`. Deck generation and
-measurement scripts consume this config rather than embedding StrongARM instance names.
+Each design folder supplies sizing variables, physical bounds and scale, transistor groups,
+SPICE `.param` mapping, derived geometry features, and enabled analyses in `sizing.yaml`.
+Symmetric devices are represented by one group-level W/L pair. Dataset feature engineering
+adds each group's W/L and W*L while retaining the physical sizing variables.
 
 ## Setup and run
 
@@ -29,11 +33,129 @@ python3 optimize_sizing.py \
   --seed 0
 ```
 
-The netlist directory name is combined with a numeric UTC timestamp to form the default
-output path, for example `run/strongarm_20261118150023990787/`. Choose `--run-id` to
-set the output folder name explicitly; existing non-empty output directories are never
-overwritten. `--algorithm` supports `halton` (space-filling initial design) and `random`;
-`--samples`, `--seed`, and `--timeout-s` control the run.
+## Collect and train
+
+Collect a space-filling dataset by running the same configured SPICE analyses used by
+`optimize_sizing.py`. `lhs` is the default; `sobol`, `halton`, and `random` are also
+available. Collection writes both the normal run folder and a flattened dataset:
+
+```bash
+python3 collect_data.py \
+  --runner ngspice \
+  --netlist netlists/strongarm/ \
+  --samples 100 \
+  --algorithm lhs \
+  --seed 0
+```
+
+By default, the dataset is written to `dataset/<netlist-name>/data.csv` (for example,
+`dataset/strongarm/data.csv`). The generic `--output dataset/data.csv` path is treated as
+the same design-scoped default; other explicit output paths are used as provided.
+
+Use a `.parquet` output path for Parquet export; this requires optional `pandas` and
+`pyarrow` packages. Failed and partial simulations are retained with their status and
+available measurements. Sizing columns are named `size__<variable>` and measured targets
+retain the metric names from the run results.
+
+For a pipeline smoke test on a machine without ngspice, choose the deterministic mock
+runner. Its measurements are synthetic and are not suitable for circuit design decisions:
+
+```bash
+python3 collect_data.py \
+  --runner mock \
+  --netlist netlists/strongarm/ \
+  --samples 40 \
+  --algorithm lhs \
+  --seed 23 \
+  --mock-failure-rate 0.05 \
+  --output dataset/strongarm/mock_data.csv
+```
+
+Train on the collected dataset and save a model plus a held-out evaluation report:
+
+```bash
+python3 train_surrogate.py \
+  --dataset dataset/strongarm/data.csv \
+  --method gpr \
+  --targets delay_s,speed_hz,power_w \
+  --output model.pkl \
+  --target-transform log-standard
+```
+
+Training supports `gpr` (Gaussian Process with Matérn 5/2 ARD), `lightgbm`, `catboost`,
+`mlp`, and `two-stage` (validity classifier followed by regression). LightGBM and CatBoost
+are included in `requirements.txt`. Targets default to standardized
+log-space; use `--target-transform standard` or `none` when appropriate. Failed samples
+are excluded from regression by default and remain labeled for two-stage classification;
+`--include-partial` opts partial results into regression. The model is serialized with
+joblib. `<model>_evaluation.json` reports held-out MAE, R2, MAPE, and feature importance
+(GPR ARD relevance and permutation importance). Only use model files from trusted sources
+when loading serialized artifacts.
+
+## Surrogate optimization
+
+`optimize_sizing.py --algorithm nrbo` loads a trained artifact and searches the configured
+sizing bounds using a finite-difference Newton-Raphson population search with randomized
+escape moves. It minimizes normalized weighted delay, speed, and power objectives; defaults
+minimize delay only. `speed_hz` is derived as `1 / delay_s` during collection, and a positive
+speed weight maximizes predicted speed. An explicit `--objective` selects one model target;
+use `--maximize-objective` for targets where larger is better. An optional predicted power
+limit adds a constraint penalty. With a two-stage model, `--min-valid-probability`
+sets the required predicted validity. This mode does not run SPICE; it writes ranked proposals to
+`run/<design>/<run-id>/candidates.csv` and `candidates.json` for final simulator verification.
+
+```bash
+python3 optimize_sizing.py \
+  --runner ngspice \
+  --netlist netlists/strongarm/ \
+  --samples 5 \
+  --algorithm nrbo \
+  --model model.pkl \
+  --delay-weight 0.0 \
+  --speed-weight 1.0 \
+  --power-weight 0.25 \
+  --max-power-w 0.02 \
+  --min-valid-probability 0.8 \
+  --seed 0
+```
+
+`--samples` sets the number of candidate sizings returned in NRBO mode. Weighted mode
+requires the targets corresponding to nonzero weights; `--max-power-w` also requires a
+trained `power_w` target. The search implementation is local to this project
+and uses numerical gradients/curvature plus population diversity; it is not a drop-in
+implementation of every published NRBO variant. qNEHVI/MOBO is not currently implemented.
+
+Verify the candidates with SPICE, then append those measured results to the training dataset
+and retrain:
+
+```bash
+python3 optimize_sizing.py \
+  --runner ngspice \
+  --netlist netlists/strongarm/ \
+  --algorithm verify \
+  --candidates run/strongarm/<nrbo-run-id>/candidates.json \
+  --neighbors-per-candidate 2
+
+python3 collect_data.py \
+  --netlist netlists/strongarm/ \
+  --from-results run/strongarm/<verify-run-id>/results.json \
+  --output dataset/data.csv \
+  --append
+
+python3 train_surrogate.py \
+  --dataset dataset/strongarm/data.csv \
+  --method gpr \
+  --targets delay_s,power_w \
+  --output model.pkl
+```
+
+The netlist directory name forms the circuit folder under `run/`; each run uses a numeric
+UTC timestamp as the default run ID, for example
+`run/strongarm/20261118150023990787/`. Choose `--run-id` to set the child folder explicitly;
+existing non-empty output directories are never overwritten. `--algorithm` supports `halton`,
+`random`, `lhs`, `sobol`, `nrbo`, and `verify`;
+`nrbo` requires `--model`, while `verify` requires `--candidates`. `--samples`, `--seed`,
+and `--timeout-s` control the run.
 
 Use `-v` for progress and metrics, `-vv` for sizing and simulator-command details, and
 `-vvv` for generated deck contents and ngspice logs.
