@@ -36,7 +36,7 @@ def _number(value):
     return number if math.isfinite(number) else None
 
 
-def _make_regressor(method: str, seed: int):
+def _make_regressor(method: str, seed: int, *, train_dir: Path | None = None):
     if method in {"gpr", "two-stage"}:
         from sklearn.gaussian_process import GaussianProcessRegressor
         from sklearn.gaussian_process.kernels import ConstantKernel, Matern
@@ -59,7 +59,17 @@ def _make_regressor(method: str, seed: int):
             from catboost import CatBoostRegressor
         except ImportError as exc:
             raise RuntimeError("CatBoost method requires the optional 'catboost' package") from exc
-        return CatBoostRegressor(iterations=300, learning_rate=0.04, depth=6, random_seed=seed, verbose=False)
+        regressor_options = {
+            "iterations": 300,
+            "learning_rate": 0.04,
+            "depth": 6,
+            "random_seed": seed,
+            "verbose": False,
+        }
+        if train_dir is not None:
+            train_dir.mkdir(parents=True, exist_ok=True)
+            regressor_options["train_dir"] = str(train_dir)
+        return CatBoostRegressor(**regressor_options)
     if method == "mlp":
         from sklearn.neural_network import MLPRegressor
 
@@ -199,7 +209,11 @@ def train(
             if target_transform != "none"
             else None
         )
-        estimator = _make_regressor(method, seed)
+        estimator = _make_regressor(
+            method,
+            seed,
+            train_dir=output.parent / "catboost_info" / target,
+        )
         if method in {"gpr", "two-stage"}:
             from sklearn.gaussian_process.kernels import ConstantKernel, Matern
 

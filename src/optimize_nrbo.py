@@ -29,7 +29,6 @@ def _sizes_from_normalized(
 
 def _predict_targets(
     normalized: np.ndarray,
-    feature_names: Sequence[str],
     sizing_config: Mapping,
     model: Mapping,
 ) -> dict[str, float]:
@@ -71,19 +70,33 @@ def optimize_candidates(
     feature_names = tuple(model.get("feature_names", ()))
     expected_features = design_feature_names(sizing_config)
     model_variables = tuple(model.get("design_variables", configured_names))
-    if set(model_variables) != set(configured_names) or len(model_variables) != len(configured_names):
-        raise ValueError("model design variables do not match optimization.variables in sizing.yaml")
+    if (
+        set(model_variables) != set(configured_names)
+        or len(model_variables) != len(configured_names)
+    ):
+        raise ValueError(
+            "model design variables do not match optimization.variables in sizing.yaml"
+        )
     allowed_features = {frozenset(expected_features), frozenset(configured_names)}
-    if frozenset(feature_names) not in allowed_features or len(set(feature_names)) != len(feature_names):
+    if (
+        frozenset(feature_names) not in allowed_features
+        or len(set(feature_names)) != len(feature_names)
+    ):
         raise ValueError("model features do not match configured raw and derived design features")
     if objective is not None and objective not in model.get("models", {}):
         raise ValueError(f"objective {objective!r} is not present in the model artifact")
     if objective is None and delay_weight > 0 and "delay_s" not in model.get("models", {}):
-        raise ValueError("weighted search requires a delay_s target when --delay-weight is positive")
+        raise ValueError(
+            "weighted search requires a delay_s target when --delay-weight is positive"
+        )
     if objective is None and power_weight > 0 and "power_w" not in model.get("models", {}):
-        raise ValueError("weighted search requires a power_w target when --power-weight is positive")
+        raise ValueError(
+            "weighted search requires a power_w target when --power-weight is positive"
+        )
     if objective is None and speed_weight > 0 and "speed_hz" not in model.get("models", {}):
-        raise ValueError("weighted search requires a speed_hz target when --speed-weight is positive")
+        raise ValueError(
+            "weighted search requires a speed_hz target when --speed-weight is positive"
+        )
     if max_power_w is not None and "power_w" not in model.get("models", {}):
         raise ValueError("--max-power-w requires a power_w target in the model artifact")
     if not 0.0 <= min_valid_probability <= 1.0:
@@ -106,7 +119,7 @@ def optimize_candidates(
         key = tuple(np.round(np.clip(normalized, 0.0, 1.0), 10))
         if key not in prediction_cache:
             predictions = _predict_targets(
-                np.asarray(key), feature_names, sizing_config, model
+                np.asarray(key), sizing_config, model
             )
             if "classifier" in model:
                 sizes = _sizes_from_normalized(
@@ -136,7 +149,8 @@ def optimize_candidates(
     def score(normalized: np.ndarray) -> float:
         predictions = predictions_at(normalized)
         if objective is not None:
-            objective_value = predictions[objective] / model.get("target_reference", {}).get(objective, 1.0)
+            target_reference = model.get("target_reference", {}).get(objective, 1.0)
+            objective_value = predictions[objective] / target_reference
             if maximize_objective:
                 objective_value = -objective_value
         else:
@@ -220,7 +234,7 @@ def optimize_candidates(
     results = []
     seen = set()
     for normalized in ranked:
-        sizes = _sizes_from_normalized(normalized, feature_names, sizing_config)
+        sizes = _sizes_from_normalized(normalized, configured_names, sizing_config)
         signature = tuple(round(sizes[name], 10) for name in configured_names)
         if signature in seen:
             continue

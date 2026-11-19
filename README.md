@@ -5,7 +5,7 @@ The project separates design-space/AI logic from simulator and netlist helpers:
 ```text
 ai_in_analog/
   netlists/<design>/   netlist.spice and sizing.yaml
-  src/                 candidate selection and dataset/AI logic only
+  src/                 design features, candidate selection, and NRBO search logic
   scripts/             parameter parsing, deck generation, and metric extraction
   runner/              simulator adapters
   collect_data.py     space-filling SPICE dataset collection
@@ -100,9 +100,10 @@ escape moves. It minimizes normalized weighted delay, speed, and power objective
 minimize delay only. `speed_hz` is derived as `1 / delay_s` during collection, and a positive
 speed weight maximizes predicted speed. An explicit `--objective` selects one model target;
 use `--maximize-objective` for targets where larger is better. An optional predicted power
-limit adds a constraint penalty. With a two-stage model, `--min-valid-probability`
-sets the required predicted validity. This mode does not run SPICE; it writes ranked proposals to
-`run/<design>/<run-id>/candidates.csv` and `candidates.json` for final simulator verification.
+limit adds a constraint penalty. With a two-stage model, `--min-valid-probability` sets the
+required predicted validity. In one invocation, NRBO loads the model, proposes candidates,
+and evaluates them using the selected runner. It saves surrogate proposals and measured
+results under `run/<design>/<run-id>/`.
 
 ```bash
 python3 optimize_sizing.py \
@@ -123,22 +124,16 @@ python3 optimize_sizing.py \
 requires the targets corresponding to nonzero weights; `--max-power-w` also requires a
 trained `power_w` target. The search implementation is local to this project
 and uses numerical gradients/curvature plus population diversity; it is not a drop-in
-implementation of every published NRBO variant. qNEHVI/MOBO is not currently implemented.
+implementation of every published NRBO variant. `--neighbors-per-candidate` optionally
+adds local sizings to the same evaluation batch. qNEHVI/MOBO is not currently implemented.
 
-Verify the candidates with SPICE, then append those measured results to the training dataset
-and retrain:
+The NRBO run writes `candidates.csv`/`candidates.json` and the usual `results.csv`/`results.json`.
+Append the measured results to the training dataset and retrain:
 
 ```bash
-python3 optimize_sizing.py \
-  --runner ngspice \
-  --netlist netlists/strongarm/ \
-  --algorithm verify \
-  --candidates run/strongarm/<nrbo-run-id>/candidates.json \
-  --neighbors-per-candidate 2
-
 python3 collect_data.py \
   --netlist netlists/strongarm/ \
-  --from-results run/strongarm/<verify-run-id>/results.json \
+  --from-results run/strongarm/<nrbo-run-id>/results.json \
   --output dataset/data.csv \
   --append
 
@@ -148,6 +143,9 @@ python3 train_surrogate.py \
   --targets delay_s,power_w \
   --output model.pkl
 ```
+
+Use `--algorithm verify --candidates <path>` only when you want to run a previously saved
+candidate file in a separate invocation.
 
 The netlist directory name forms the circuit folder under `run/`; each run uses a numeric
 UTC timestamp as the default run ID, for example
