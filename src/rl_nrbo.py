@@ -1,13 +1,14 @@
-"""Direct-feedback PPO/SAC controllers for NRBO sizing search."""
+"""NRBO orchestration for PPO/SAC direct-evaluation control."""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable, Mapping
 
 import numpy as np
-import gymnasium as gym
-from gymnasium import spaces
-from stable_baselines3 import PPO, SAC
+
+from src.ppo_controller import PPOController
+from src.rl_controller import DirectEvaluationEnv
+from src.sac_controller import SACController
 
 
 def _next_population(
@@ -16,7 +17,7 @@ def _next_population(
     action: np.ndarray,
     random: np.random.Generator,
 ) -> np.ndarray:
-    """Apply one NRBO generation using continuous RL-selected operator controls."""
+    """Apply one NRBO generation using RL-selected continuous controls."""
     controls = np.clip(np.asarray(action, dtype=float), 0.0, 1.0)
     restart_probability = 0.02 + 0.48 * controls[0]
     newton_weight = controls[1]
@@ -62,9 +63,10 @@ def optimize_with_rl_nrbo(
     evaluate_candidate: Callable[[np.ndarray], Mapping],
     score_candidate: Callable[[Mapping], float],
     is_feasible: Callable[[Mapping], bool],
-    policy_path: str | Path | None = None,
+    checkpoint_dir: str | Path,
+    resume_model: str | Path | None = None,
 ) -> list[dict]:
-    """Train PPO/SAC on direct circuit evaluations and return best measured designs."""
+    """Train/load PPO or SAC and return directly measured NRBO candidates."""
     algorithm = algorithm.upper()
     if algorithm not in {"PPO", "SAC"}:
         raise ValueError("algorithm must be PPO or SAC")
@@ -73,148 +75,35 @@ def optimize_with_rl_nrbo(
     if timesteps < 64 or episode_length < 2:
         raise ValueError("timesteps must be at least 64 and episode_length at least 2")
 
-    class DirectEvaluationEnv(gym.Env):
-        """Search population environment rewarded by measured SPICE/mock metrics."""
+    environment = DirectEvaluationEnv(
+        dimension=dimension,
+        population_size=population_size,
+        episode_length=episode_length,
+        seed=seed,
+        evaluate_candidate=evaluate_candidate,
+        score_candidate=score_candidate,
+        is_feasible=is_feasible,
+        next_population=_next_population,
+    )
 
-        metadata = {"render_modes": []}
-
-        def __init__(self):
-            super().__init__()
-            self.action_space = spaces.Box(
-                low=np.zeros(3, dtype=np.float32),
-                high=np.ones(3, dtype=np.float32),
-                dtype=np.float32,
-            )
-            self.observation_space = spaces.Box(
-                low=-1.0,
-                high=1.0,
-                shape=(5,),
-                dtype=np.float32,
-            )
-            self.archive: dict[tuple[float, ...], dict] = {}
-            self.evaluation_cache: dict[tuple[float, ...], tuple[dict, float, bool]] = {}
-            self.population = np.empty((population_size, dimension), dtype=float)
-            self.scores = np.empty(population_size, dtype=float)
-            self.feasible = np.zeros(population_size, dtype=bool)
-            self.step_count = 0
-            self.best_score = float("inf")
-            self.initial_scale = 1.0
-
-        def _evaluate_population(self) -> None:
-            scores = []
-            feasible = []
-            for candidate in self.population:
-                key = tuple(np.round(candidate, 10))
-                cached = self.evaluation_cache.get(key)
-                if cached is None:
-                    record = evaluate_candidate(candidate.copy())
-                    candidate_score = float(score_candidate(record))
-                    candidate_feasible = bool(is_feasible(record))
-                    if not np.isfinite(candidate_score):
-                        candidate_score = 1e6
-                        candidate_feasible = False
-                    cached = (dict(record), candidate_score, candidate_feasible)
-                    self.evaluation_cache[key] = cached
-                record, candidate_score, candidate_feasible = cached
-                scores.append(candidate_score)
-                feasible.append(candidate_feasible)
-                previous = self.archive.get(key)
-                if previous is None or candidate_score < previous["score"]:
-                    self.archive[key] = {
-                        "score": candidate_score,
-                        "feasible": candidate_feasible,
-                        "record": record,
-                    }
-            self.scores = np.asarray(scores, dtype=float)
-            self.feasible = np.asarray(feasible, dtype=bool)
-
-        def _observation(self) -> np.ndarray:
-            diversity = min(float(np.mean(np.std(self.population, axis=0))) * 2.0, 1.0)
-            feasible_fraction = float(np.mean(self.feasible))
-            return np.asarray(
-                [
-                    self.step_count / episode_length,
-                    np.tanh(self.best_score / self.initial_scale),
-                    diversity,
-                    feasible_fraction,
-                    min(float(np.mean(self.scores)), 1e6) / 1e6,
-                ],
-                dtype=np.float32,
-            )
-
-        def reset(self, *, seed=None, options=None):
-            """Start a search episode with a fresh sizing population."""
-            super().reset(seed=seed)
-            _ = options
-            self.population = self.np_random.random((population_size, dimension))
-            self.step_count = 0
-            self.best_score = float("inf")
-            self._evaluate_population()
-            self.best_score = float(np.min(self.scores))
-            self.initial_scale = max(abs(self.best_score), 1e-6)
-            return self._observation(), {}
-
-        def step(self, action):
-            """Apply RL-selected NRBO controls and reward measured improvement."""
-            previous_best = self.best_score
-            self.population = _next_population(
-                self.population,
-                self.scores,
-                action,
-                self.np_random,
-            )
-            self._evaluate_population()
-            self.best_score = min(previous_best, float(np.min(self.scores)))
-            improvement = previous_best - self.best_score
-            feasible_fraction = float(np.mean(self.feasible))
-            reward = float(
-                2.0 * np.tanh(improvement / self.initial_scale)
-                + 0.05 * feasible_fraction
-                - 0.01
-            )
-            self.step_count += 1
-            terminated = self.step_count >= episode_length
-            return self._observation(), reward, terminated, False, {}
-
-        def render(self):
-            """The headless simulator optimization environment has no renderer."""
-            return None
-
-    environment = DirectEvaluationEnv()
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     if algorithm == "PPO":
-        controller = PPO(
-            "MlpPolicy",
-            environment,
-            n_steps=8,
-            batch_size=8,
-            gamma=0.95,
-            seed=seed,
-            verbose=0,
-            device="cpu",
-        )
+        controller = PPOController(environment, seed)
     else:
-        controller = SAC(
-            "MlpPolicy",
-            environment,
-            learning_starts=16,
-            buffer_size=max(1000, timesteps * 2),
-            batch_size=16,
-            train_freq=1,
-            gradient_steps=1,
-            gamma=0.95,
-            seed=seed,
-            verbose=0,
-            device="cpu",
-        )
-    controller.learn(total_timesteps=timesteps, progress_bar=False)
+        controller = SACController(environment, seed, timesteps)
+
+    if resume_model is not None:
+        controller.load(Path(resume_model).parent)
+
+    controller.learn(timesteps)
     observation, _ = environment.reset(seed=seed + 1)
     for _ in range(episode_length):
-        action, _ = controller.predict(observation, deterministic=True)
+        action = controller.predict(observation)
         observation, _, terminated, _, _ = environment.step(action)
         if terminated:
             break
-    if policy_path is not None:
-        controller.save(str(policy_path))
+    controller.save(checkpoint_dir)
 
     ranked = sorted(
         environment.archive.values(),

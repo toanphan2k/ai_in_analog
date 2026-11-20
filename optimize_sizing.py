@@ -27,17 +27,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="RL controller; NRBO is always the metaheuristic",
     )
     parser.add_argument("--samples", type=int, default=5, help="number of top measured candidates")
-    parser.add_argument(
-        "--objective",
-        choices=("delay_s", "speed_hz", "power_w"),
-        help="single measured objective; otherwise use weighted objectives",
-    )
-    parser.add_argument("--maximize-objective", action="store_true")
-    parser.add_argument("--delay-weight", type=float, default=1.0)
-    parser.add_argument("--speed-weight", type=float, default=0.0)
-    parser.add_argument("--power-weight", type=float, default=0.0)
-    parser.add_argument("--power-reference-w", type=float, default=0.01)
-    parser.add_argument("--max-power-w", type=float)
     parser.add_argument("--population-size", type=int, default=4)
     parser.add_argument(
         "--rl-timesteps",
@@ -48,13 +37,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--episode-length", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--run-id", help="child directory under run/<design>/")
+    parser.add_argument(
+        "--resume",
+        help=(
+            "existing run path or run ID; controller resumes from "
+            "run/<design>/<run-id>/checkpoints/<PPO|SAC>/"
+        ),
+    )
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--mock-failure-rate", type=float, default=0.03)
-    parser.add_argument("-v", "--verbose", action="count", default=0)
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="increase progress detail (-v progress, -vv debug)",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=(logging.WARNING, logging.INFO, logging.DEBUG)[min(args.verbose, 2)],
+        handlers=[logging.StreamHandler()],
         format="%(asctime)s %(levelname)-8s %(message)s",
         datefmt="%H:%M:%S",
         force=True,
@@ -66,19 +69,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         algorithm=args.algorithm,
         samples=args.samples,
         seed=args.seed,
-        objective=args.objective,
-        maximize_objective=args.maximize_objective,
-        delay_weight=args.delay_weight,
-        speed_weight=args.speed_weight,
-        power_weight=args.power_weight,
-        power_reference_w=args.power_reference_w,
-        max_power_w=args.max_power_w,
         population_size=args.population_size,
         timesteps=args.rl_timesteps,
         episode_length=args.episode_length,
         mock_failure_rate=args.mock_failure_rate,
         run_id=args.run_id,
+        resume=args.resume,
         timeout_s=args.timeout_s,
+        verbose=args.verbose,
     )
     print(f"Results: {run_dir}")
     print(f"Elapsed: {time.perf_counter() - started:.2f} s")

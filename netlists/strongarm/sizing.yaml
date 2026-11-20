@@ -62,6 +62,15 @@ analyses:
     output_negative: "v(Y)"
     clock_vector: "v(ck)"
     power_vector: "p_inst"
+  offset:
+    enabled: false
+    recipe: "not-configured"
+  noise:
+    enabled: false
+    recipe: "not-configured"
+  kickback:
+    enabled: false
+    recipe: "not-configured"
   gain:
     enabled: true
     source_overrides:
