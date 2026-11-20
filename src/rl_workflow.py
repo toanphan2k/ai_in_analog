@@ -51,6 +51,7 @@ RESULT_COLUMNS = (
     "peak_gain_v_per_v",
     "peak_gain_frequency_hz",
     "bandwidth_3db_hz",
+    "samples",
     "rl_objective_score",
     "rl_feasible",
     "error",
@@ -105,15 +106,25 @@ def _physical_sizes(config: Mapping, vector: Sequence[float]) -> dict[str, float
 
 def _write_results_csv(path: Path, samples: list[dict]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=RESULT_COLUMNS)
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=RESULT_COLUMNS,
+            extrasaction="ignore",
+        )
         writer.writeheader()
         for sample in samples:
+            metrics = sample.get("metrics", {})
             writer.writerow(
                 {
                     "sample": sample["name"],
                     "status": sample["status"],
                     "size_json": json.dumps(sample["size"], sort_keys=True),
-                    **sample.get("metrics", {}),
+                    **{
+                        column: metrics[column]
+                        for column in RESULT_COLUMNS
+                        if column in metrics
+                        and column not in {"sample", "status", "size_json", "error"}
+                    },
                     "error": sample.get("error", ""),
                 }
             )
