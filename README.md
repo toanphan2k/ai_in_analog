@@ -13,6 +13,7 @@ ai_in_analog/
   src/rl_workflow.py       simulator evaluation, objective/reward, and run artifacts
   runner/                  ngspice and mock runners
   scripts/                 SPICE deck generation and metric extraction
+  plot/                    standalone and batch plotting scripts for results.csv
   run/<design>/<run-id>/   policy, candidates, and measured sample records
 ```
 
@@ -159,10 +160,49 @@ Default run IDs use `run_YYYY_MM_DD_HH_MM`; for example:
 `run/strongarm/run_2026_11_20_17_07/`. A custom `--run-id test` becomes `run_test`; a
 custom value already starting with `run_` is not prefixed again.
 
-The run directory contains `candidates.json`/`candidates.csv`,
-`results.json`/`results.csv`, the sizing config snapshot, and per-evaluation decks, logs,
-and metrics. Candidate rankings are based on direct simulator measurements, not surrogate
-predictions.
+The run directory contains `candidates.json`, `results.json`/`results.csv`, the sizing and
+scoring config snapshots, `checkpoints/`, and per-evaluation sample folders (`sample_XXXXXX/`
+containing decks, logs, waveforms, and metrics) under `data/`. `results.csv` records
+`sample`, `algorithm`, `iteration`, `seed`, `status`, individual design W/L columns parsed from
+`sizing.yaml` (e.g., `w_in`, `l_in`, `w_n`, `w_p`, `w_rst`, `w_tail`, `w_8`, `l_8`), extracted
+metrics, `rl_objective_score`, `rl_feasible`, and `error`. Candidate rankings are based on
+direct simulator measurements, not surrogate predictions.
+
+## Plotting Results
+
+Standalone plotting scripts live under `plot/` (one script per plot, plus `plot/plot.py` to
+generate all 5 plots together):
+
+- `plot/plot_objective_score.py` — Plot 1: Objective Score vs. Evaluation Number
+- `plot/plot_feasibility_rate.py` — Plot 2: Feasibility Rate vs. Evaluation Number
+- `plot/plot_power_vs_delay.py` — Plot 3: Power vs. Delay (with feasible Pareto front)
+- `plot/plot_offset_vs_noise.py` — Plot 4: Offset vs. Noise (with feasible Pareto front)
+- `plot/plot_kickback_vs_noise.py` — Plot 5: Kickback vs. Input-Referred Noise (with feasible Pareto front)
+
+Generate a single plot or all 5 plots from one or more `results.csv` files:
+
+```bash
+python3 plot/plot_objective_score.py --csv run/strongarm/<run-id>/results.csv
+python3 plot/plot.py --csv run/strongarm/<run-id>/results.csv
+```
+
+Compare multiple runs (e.g., PPO vs. SAC or multiple seeds) on the same axes by passing multiple
+CSV paths:
+
+```bash
+python3 plot/plot.py \
+  --csv run/strongarm/<ppo-run>/results.csv run/strongarm/<sac-run>/results.csv
+```
+
+By default, PNGs are saved outside `run/` into the workspace directory:
+
+```text
+plot_<algorithm>_seed_<seed>_iteration_<iteration>/
+```
+
+Use `-o/--output` (for individual scripts) or `-o/--output-dir` (for `plot/plot.py`) to
+override the output path, `--dpi` to adjust resolution, and `--show` to open an interactive
+window.
 
 ## Resume a checkpoint
 

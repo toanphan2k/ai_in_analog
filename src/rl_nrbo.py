@@ -60,11 +60,12 @@ def optimize_with_rl_nrbo(
     timesteps: int,
     episode_length: int,
     seed: int,
-    evaluate_candidate: Callable[[np.ndarray], Mapping],
+    evaluate_candidate: Callable[[np.ndarray, int], Mapping],
     score_candidate: Callable[[Mapping], float],
     is_feasible: Callable[[Mapping], bool],
     checkpoint_dir: str | Path,
     resume_model: str | Path | None = None,
+    initial_iteration: int = 0,
 ) -> list[dict]:
     """Train/load PPO or SAC and return directly measured NRBO candidates."""
     algorithm = algorithm.upper()
@@ -84,6 +85,7 @@ def optimize_with_rl_nrbo(
         score_candidate=score_candidate,
         is_feasible=is_feasible,
         next_population=_next_population,
+        initial_iteration=initial_iteration,
     )
 
     checkpoint_dir = Path(checkpoint_dir)

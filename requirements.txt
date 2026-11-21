@@ -1,4 +1,5 @@
 # Runtime dependencies for direct PPO/SAC plus NRBO sizing search.
+matplotlib>=3.8
 numpy>=2.0
 PyYAML>=6
 stable-baselines3>=2.4,<3

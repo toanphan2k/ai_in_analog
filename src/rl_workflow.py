@@ -41,10 +41,14 @@ EVALUATION_ERRORS = (
     IndexError,
     subprocess.SubprocessError,
 )
-RESULT_COLUMNS = (
+RESULT_PREFIX_COLUMNS = (
     "sample",
+    "algorithm",
+    "iteration",
+    "seed",
     "status",
-    "size_json",
+)
+RESULT_METRIC_COLUMNS = (
     "delay_s",
     "delay_mean_s",
     "speed_hz",
@@ -113,19 +117,65 @@ def _physical_sizes(config: Mapping, vector: Sequence[float]) -> dict[str, float
     return sizes
 
 
-def _write_results_csv(path: Path, samples: list[dict]) -> None:
+def _size_column_names(
+    samples: Sequence[Mapping[str, Any]],
+    design_names: Sequence[str] = (),
+) -> tuple[str, ...]:
+    columns: list[str] = []
+    seen: set[str] = set()
+    for name in design_names:
+        if name not in seen:
+            columns.append(name)
+            seen.add(name)
+    extra: set[str] = set()
+    for sample in samples:
+        size = sample.get("size")
+        if isinstance(size, Mapping):
+            extra.update(str(key) for key in size if str(key) not in seen)
+    columns.extend(sorted(extra))
+    return tuple(columns)
+
+
+def _write_results_csv(
+    path: Path,
+    samples: Sequence[Mapping[str, Any]],
+    *,
+    design_names: Sequence[str] = (),
+    algorithm: str | None = None,
+    seed: int | None = None,
+) -> None:
+    size_columns = _size_column_names(samples, design_names)
+    fieldnames = RESULT_PREFIX_COLUMNS + size_columns + RESULT_METRIC_COLUMNS
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=RESULT_COLUMNS, extrasaction="ignore")
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for sample in samples:
             metrics = sample.get("metrics", {})
-            row = {
+            size = sample.get("size", {})
+            sample_algorithm = sample.get("algorithm")
+            sample_iteration = sample.get("iteration")
+            sample_seed = sample.get("seed")
+            row: dict[str, Any] = {
                 "sample": sample["name"],
+                "algorithm": (
+                    sample_algorithm
+                    if sample_algorithm is not None
+                    else (algorithm if algorithm is not None else "")
+                ),
+                "iteration": "" if sample_iteration is None else sample_iteration,
+                "seed": (
+                    sample_seed
+                    if sample_seed is not None
+                    else (seed if seed is not None else "")
+                ),
                 "status": sample["status"],
-                "size_json": json.dumps(sample["size"], sort_keys=True),
                 "error": sample.get("error", ""),
             }
-            for column in RESULT_COLUMNS:
+            if isinstance(size, Mapping):
+                for column in size_columns:
+                    if column in size:
+                        row[column] = size[column]
+            for column in RESULT_METRIC_COLUMNS:
                 if column in metrics:
                     row[column] = metrics[column]
             writer.writerow(row)
@@ -174,6 +224,10 @@ def _run_ngspice(
         )
 
 
+def _sample_dir(run_dir: Path, index: int) -> Path:
+    return run_dir / "data" / f"sample_{index:06d}"
+
+
 def _evaluate_sample(
     index: int,
     vector: Sequence[float],
@@ -186,7 +240,7 @@ def _evaluate_sample(
     run_dir: Path,
 ) -> dict:
     sample_name = f"{run_name}_{index:06d}"
-    sample_dir = run_dir / f"sample_{index:06d}"
+    sample_dir = _sample_dir(run_dir, index)
     sample_dir.mkdir(parents=True)
     record = {
         "name": sample_name,
@@ -453,6 +507,13 @@ def run_rl_sizing(
                 f"resume checkpoint model does not exist: {checkpoint_model}"
             )
         existing_samples = previous_metadata.get("samples", [])
+        previous_algorithm = previous_metadata.get("algorithm")
+        previous_seed = previous_metadata.get("seed")
+        for existing_sample in existing_samples:
+            if "algorithm" not in existing_sample and previous_algorithm is not None:
+                existing_sample["algorithm"] = previous_algorithm
+            if "seed" not in existing_sample and previous_seed is not None:
+                existing_sample["seed"] = previous_seed
     else:
         if run_id is None:
             run_id = datetime.now(timezone.utc).strftime("run_%Y_%m_%d_%H_%M")
@@ -472,6 +533,7 @@ def run_rl_sizing(
     (run_dir / "sizing.yaml").write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
     (run_dir / "scoring.yaml").write_text(score_path.read_text(encoding="utf-8"), encoding="utf-8")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "data").mkdir(parents=True, exist_ok=True)
 
     resolved = {
         "delay_weight": delay_weight,
@@ -576,7 +638,16 @@ def run_rl_sizing(
         power = record.get("metrics", {}).get("power_w")
         return max_power_w is None or (power is not None and float(power) <= max_power_w)
 
-    def evaluate_candidate(vector: np.ndarray) -> Mapping:
+    initial_iteration = max(
+        (
+            int(existing["iteration"])
+            for existing in existing_samples
+            if existing.get("iteration") is not None
+        ),
+        default=0,
+    )
+
+    def evaluate_candidate(vector: np.ndarray, iteration: int) -> Mapping:
         key = tuple(np.round(np.clip(vector, 0.0, 1.0), 10))
         if key in evaluated_by_vector:
             return evaluated_by_vector[key]
@@ -600,7 +671,7 @@ def run_rl_sizing(
                 run_dir=run_dir,
             )
         except EVALUATION_ERRORS as exc:
-            sample_dir = run_dir / f"sample_{index:06d}"
+            sample_dir = _sample_dir(run_dir, index)
             sample_dir.mkdir(parents=True, exist_ok=True)
             record = {
                 "name": f"{run_id}_{index:06d}",
@@ -611,6 +682,9 @@ def run_rl_sizing(
                 "files": {},
                 "error": f"{type(exc).__name__}: {exc}",
             }
+        record["algorithm"] = algorithm
+        record["iteration"] = int(iteration)
+        record["seed"] = seed
         record["metrics"]["rl_objective_score"] = objective_score(record)
         record["metrics"]["rl_feasible"] = is_feasible(record)
         record.update(record["metrics"])
@@ -621,7 +695,7 @@ def run_rl_sizing(
                 f"feasible={record['metrics']['rl_feasible']}, status={record['status']}",
                 file=sys.stderr,
             )
-        _atomic_json(run_dir / f"sample_{index:06d}" / "result.json", record)
+        _atomic_json(_sample_dir(run_dir, index) / "result.json", record)
         metadata["samples"].append(record)
         metadata["completed_samples"] = len(metadata["samples"])
         metadata["status"] = (
@@ -633,7 +707,13 @@ def run_rl_sizing(
         if index % CHECKPOINT_INTERVAL == 0:
             if verbose >= 1:
                 print(f"Checkpoint: {index} candidates evaluated", file=sys.stderr)
-            _write_results_csv(run_dir / "results.csv", metadata["samples"])
+            _write_results_csv(
+                run_dir / "results.csv",
+                metadata["samples"],
+                design_names=design_names,
+                algorithm=algorithm,
+                seed=seed,
+            )
             _atomic_json(run_dir / "results.json", metadata)
         return record
 
@@ -654,6 +734,7 @@ def run_rl_sizing(
             if resume is not None
             else None
         ),
+        initial_iteration=initial_iteration,
     )
     if verbose >= 1:
         print(f"Ranking {len(candidates)} measured candidates", file=sys.stderr)
@@ -666,7 +747,13 @@ def run_rl_sizing(
         "note": "Candidates are ranked from direct measurements; no surrogate model is used.",
     }
     _atomic_json(run_dir / "candidates.json", candidate_payload)
-    _write_results_csv(run_dir / "results.csv", metadata["samples"])
+    _write_results_csv(
+        run_dir / "results.csv",
+        metadata["samples"],
+        design_names=design_names,
+        algorithm=algorithm,
+        seed=seed,
+    )
     metadata["completed_at"] = datetime.now(timezone.utc).isoformat()
     metadata["candidate_count"] = len(candidates)
     _atomic_json(run_dir / "results.json", metadata)

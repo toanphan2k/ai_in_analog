@@ -21,13 +21,14 @@ class DirectEvaluationEnv(gym.Env):
         population_size: int,
         episode_length: int,
         seed: int,
-        evaluate_candidate: Callable[[np.ndarray], Mapping],
+        evaluate_candidate: Callable[[np.ndarray, int], Mapping],
         score_candidate: Callable[[Mapping], float],
         is_feasible: Callable[[Mapping], bool],
         next_population: Callable[
             [np.ndarray, np.ndarray, np.ndarray, np.random.Generator],
             np.ndarray,
         ],
+        initial_iteration: int = 0,
     ):
         super().__init__()
         self.action_space = spaces.Box(
@@ -55,6 +56,7 @@ class DirectEvaluationEnv(gym.Env):
         self.scores = np.empty(population_size, dtype=float)
         self.feasible = np.zeros(population_size, dtype=bool)
         self.step_count = 0
+        self.iteration = initial_iteration
         self.best_score = float("inf")
         self.initial_scale = 1.0
 
@@ -65,7 +67,7 @@ class DirectEvaluationEnv(gym.Env):
             key = tuple(np.round(candidate, 10))
             cached = self.evaluation_cache.get(key)
             if cached is None:
-                record = self.evaluate_candidate(candidate.copy())
+                record = self.evaluate_candidate(candidate.copy(), self.iteration)
                 candidate_score = float(self.score_candidate(record))
                 candidate_feasible = bool(self.is_feasible(record))
                 if not np.isfinite(candidate_score):
@@ -106,6 +108,7 @@ class DirectEvaluationEnv(gym.Env):
         _ = options
         self.population = self.np_random.random((self.population_size, self.dimension))
         self.step_count = 0
+        self.iteration += 1
         self.best_score = float("inf")
         self._evaluate_population()
         self.best_score = float(np.min(self.scores))
@@ -121,6 +124,7 @@ class DirectEvaluationEnv(gym.Env):
             action,
             self.np_random,
         )
+        self.iteration += 1
         self._evaluate_population()
         self.best_score = min(previous_best, float(np.min(self.scores)))
         improvement = previous_best - self.best_score
