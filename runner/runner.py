@@ -9,7 +9,7 @@ from typing import Sequence
 from .ngspice_runner import NgspiceRun
 
 
-ANALYSES = ("delay", "offset", "gain")
+ANALYSES = ("all", "delay", "offset", "noise", "kickback", "gain")
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 
 

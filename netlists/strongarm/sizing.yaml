@@ -55,6 +55,8 @@ groups:
 
 analyses:
   transient:
+    enabled: true
+    waveform: "transient.txt"
     vdd_v: 1.8
     period_s: 5.0e-10
     power_window_s: [5.0e-9, 1.6e-8]
@@ -62,31 +64,26 @@ analyses:
     output_negative: "v(Y)"
     clock_vector: "v(ck)"
     power_vector: "p_inst"
-  offset:
-    enabled: false
-    recipe: "not-configured"
-  noise:
-    enabled: false
-    recipe: "not-configured"
-  kickback:
-    enabled: false
-    recipe: "not-configured"
   gain:
     enabled: true
-    source_overrides:
-      VCK: "VCK ck 0 1.8"
-      Vinp: "Vinp inp 0 DC 0.9 AC 0.5"
-      Vinn: "Vinn inn 0 DC 0.9 AC -0.5"
-    extra_devices:
-      - "LX X vdd 1e6"
-      - "LY Y vdd 1e6"
-    control:
-      - "set wr_singlescale"
-      - "set wr_vecnames"
-      - "op"
-      - "ac dec 25 1 1e11"
-    vectors: ["v(X)", "v(Y)", "v(inp)", "v(inn)"]
+    waveform: "ac.txt"
     output_positive: "v(X)"
     output_negative: "v(Y)"
     input_positive: "v(inp)"
     input_negative: "v(inn)"
+  offset:
+    enabled: true
+    metrics_file: "metrics.txt"
+    key: "input_referred_offset_v"
+  noise:
+    enabled: true
+    waveform: "noise.txt"
+    metrics_file: "metrics.txt"
+    output_spectrum: "onoise_spectrum"
+    input_spectrum: "inoise_spectrum"
+  kickback:
+    enabled: true
+    waveform: "kickback.txt"
+    metrics_file: "metrics.txt"
+    window_s: [1.0e-9, 3.0e-9]
+    differential_vector: "vkb_diff"

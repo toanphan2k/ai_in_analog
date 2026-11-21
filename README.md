@@ -134,10 +134,11 @@ $S_{previous}-S_{best}$ is improvement in the candidate score. With the current 
 constants, $R$ is approximately in $[-0.01,2.04]$, while candidate scores have no fixed
 bounded range.
 
-Available measured targets are `delay_s`, `speed_hz`, `power_w`, and
-`energy_per_comparison_j`. Offset, input-referred noise, and kickback require a dedicated
-real-SPICE analysis recipe: the mock runner provides synthetic values for pipeline testing,
-but ngspice reports these fields only when their measurement is configured and extracted.
+Measured targets collected in a single unified `netlist.spice` simulation per candidate
+include `delay_s`, `speed_hz`, `power_w`, `energy_per_comparison_j`,
+`dc_gain_v_per_v`, `bandwidth_3db_hz`, `input_referred_offset_v`,
+`input_referred_noise_v`, and `kickback_noise_v`. The mock runner produces synthetic
+values with the same metric schema for fast pipeline smoke tests.
 
 Use `-v` for start, candidate-evaluation, checkpoint, ranking, and completion INFO logs.
 Use `-vv` for additional DEBUG details supported by the workflow. `-v` does not change

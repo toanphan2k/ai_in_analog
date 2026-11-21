@@ -72,8 +72,8 @@ def optimize_with_rl_nrbo(
         raise ValueError("algorithm must be PPO or SAC")
     if dimension <= 0 or population_size < 4 or top_k <= 0:
         raise ValueError("dimension and top_k must be positive; population must be at least 4")
-    if timesteps < 64 or episode_length < 2:
-        raise ValueError("timesteps must be at least 64 and episode_length at least 2")
+    if timesteps < 4 or episode_length < 2:
+        raise ValueError("timesteps must be at least 4 and episode_length at least 2")
 
     environment = DirectEvaluationEnv(
         dimension=dimension,
@@ -89,7 +89,7 @@ def optimize_with_rl_nrbo(
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     if algorithm == "PPO":
-        controller = PPOController(environment, seed)
+        controller = PPOController(environment, seed, timesteps)
     else:
         controller = SACController(environment, seed, timesteps)
 

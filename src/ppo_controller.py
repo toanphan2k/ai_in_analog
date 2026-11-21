@@ -12,13 +12,14 @@ from src.rl_controller import DirectEvaluationEnv, RLController
 class PPOController(RLController):
     """On-policy PPO controller with model checkpoint persistence."""
 
-    def __init__(self, environment: DirectEvaluationEnv, seed: int):
+    def __init__(self, environment: DirectEvaluationEnv, seed: int, timesteps: int = 64):
         super().__init__(environment=environment, seed=seed)
+        rollout_steps = min(8, max(2, timesteps))
         self.model = PPO(
             "MlpPolicy",
             environment,
-            n_steps=8,
-            batch_size=8,
+            n_steps=rollout_steps,
+            batch_size=rollout_steps,
             gamma=0.95,
             seed=seed,
             verbose=0,

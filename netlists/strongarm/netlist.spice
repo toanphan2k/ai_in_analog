@@ -1,8 +1,8 @@
-* Nominal StrongARM deck; sizing vector is the normalized midpoint (all 0.5).
-* Spec: configs\spec_sky130_2ghz.yaml
+* Nominal StrongARM unified deck; sizing vector is the normalized midpoint (all 0.5).
+* Collects transient delay/power/energy, kickback noise, AC gain/bandwidth,
+* input-referred noise, and Pelgrom/BSIM4 small-signal input-referred offset in 1 ngspice run.
 * Normalized design vector: 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5
 * Log-scaled sizing variables map 0.5 to their geometric-mean value.
-* sa_nrbo_strongarm StrongARM transient deck (corner=tt, mm=0)
 .lib "/usr/local/share/pdk/sky130A/libs.tech/ngspice/sky130.lib.spice" tt
 .temp 27
 .param VDD=1.8
@@ -17,78 +17,171 @@
 .param L_EQ=0.39
 .param W_RST=4.47
 .param L_RST=0.15
+
+* Expose sizing parameters and SKY130 mismatch slopes to .control for DCMatch offset
+.csparam cs_w_in={W_IN}
+.csparam cs_l_in={L_IN}
+.csparam cs_w_n={W_N}
+.csparam cs_l_n={L_N}
+.csparam cs_w_p={W_P}
+.csparam cs_l_p={L_P}
+.csparam cs_w_rst={W_RST}
+.csparam cs_l_rst={L_RST}
+.csparam avt_n=3.356e-3
+.csparam avt_p=5.856e-3
+
+* Supply and clock (VCK_dc=0 in transient; set to VDD in AC/noise/offset)
 VDD vdd 0 1.8
-VCK ck 0 PULSE(0 1.8 2.375000e-10 2.500000e-11 2.500000e-11 2.250000e-10 5.000000e-10)
-Vinp inp 0 PWL(0.000000e+00 9.500000e-01 6.240000e-10 9.500000e-01 6.250000e-10 8.500000e-01 1.124000e-09 8.500000e-01 1.125000e-09 8.500000e-01 1.624000e-09 8.500000e-01 1.625000e-09 8.500000e-01 2.124000e-09 8.500000e-01 2.125000e-09 8.500000e-01 2.624000e-09 8.500000e-01 2.625000e-09 8.500000e-01 3.124000e-09 8.500000e-01 3.125000e-09 8.500000e-01 3.624000e-09 8.500000e-01 3.625000e-09 8.500000e-01 4.124000e-09 8.500000e-01 4.125000e-09 8.500000e-01 4.624000e-09 8.500000e-01 4.625000e-09 8.500000e-01 5.124000e-09 8.500000e-01 5.125000e-09 8.500000e-01 5.624000e-09 8.500000e-01 5.625000e-09 8.500000e-01 6.124000e-09 8.500000e-01 6.125000e-09 8.500000e-01 6.624000e-09 8.500000e-01 6.625000e-09 8.500000e-01 7.124000e-09 8.500000e-01 7.125000e-09 8.500000e-01 7.624000e-09 8.500000e-01 7.625000e-09 8.500000e-01 8.124000e-09 8.500000e-01 8.125000e-09 8.500000e-01 8.624000e-09 8.500000e-01 8.625000e-09 8.500000e-01 9.124000e-09 8.500000e-01 9.125000e-09 8.500000e-01 9.624000e-09 8.500000e-01 9.625000e-09 8.500000e-01 1.012400e-08 8.500000e-01 1.012500e-08 8.500000e-01 1.062400e-08 8.500000e-01 1.062500e-08 8.500000e-01 1.112400e-08 8.500000e-01 1.112500e-08 8.500000e-01 1.162400e-08 8.500000e-01 1.162500e-08 8.500000e-01 1.212400e-08 8.500000e-01 1.212500e-08 8.500000e-01 1.262400e-08 8.500000e-01 1.262500e-08 8.500000e-01 1.312400e-08 8.500000e-01 1.312500e-08 8.500000e-01 1.362400e-08 8.500000e-01 1.362500e-08 8.500000e-01 1.412400e-08 8.500000e-01 1.412500e-08 8.500000e-01 1.462400e-08 8.500000e-01 1.462500e-08 8.500000e-01 1.512400e-08 8.500000e-01 1.512500e-08 8.500000e-01)
-Vinn inn 0 PWL(0.000000e+00 8.500000e-01 6.240000e-10 8.500000e-01 6.250000e-10 9.500000e-01 1.124000e-09 9.500000e-01 1.125000e-09 9.500000e-01 1.624000e-09 9.500000e-01 1.625000e-09 9.500000e-01 2.124000e-09 9.500000e-01 2.125000e-09 9.500000e-01 2.624000e-09 9.500000e-01 2.625000e-09 9.500000e-01 3.124000e-09 9.500000e-01 3.125000e-09 9.500000e-01 3.624000e-09 9.500000e-01 3.625000e-09 9.500000e-01 4.124000e-09 9.500000e-01 4.125000e-09 9.500000e-01 4.624000e-09 9.500000e-01 4.625000e-09 9.500000e-01 5.124000e-09 9.500000e-01 5.125000e-09 9.500000e-01 5.624000e-09 9.500000e-01 5.625000e-09 9.500000e-01 6.124000e-09 9.500000e-01 6.125000e-09 9.500000e-01 6.624000e-09 9.500000e-01 6.625000e-09 9.500000e-01 7.124000e-09 9.500000e-01 7.125000e-09 9.500000e-01 7.624000e-09 9.500000e-01 7.625000e-09 9.500000e-01 8.124000e-09 9.500000e-01 8.125000e-09 9.500000e-01 8.624000e-09 9.500000e-01 8.625000e-09 9.500000e-01 9.124000e-09 9.500000e-01 9.125000e-09 9.500000e-01 9.624000e-09 9.500000e-01 9.625000e-09 9.500000e-01 1.012400e-08 9.500000e-01 1.012500e-08 9.500000e-01 1.062400e-08 9.500000e-01 1.062500e-08 9.500000e-01 1.112400e-08 9.500000e-01 1.112500e-08 9.500000e-01 1.162400e-08 9.500000e-01 1.162500e-08 9.500000e-01 1.212400e-08 9.500000e-01 1.212500e-08 9.500000e-01 1.262400e-08 9.500000e-01 1.262500e-08 9.500000e-01 1.312400e-08 9.500000e-01 1.312500e-08 9.500000e-01 1.362400e-08 9.500000e-01 1.362500e-08 9.500000e-01 1.412400e-08 9.500000e-01 1.412500e-08 9.500000e-01 1.462400e-08 9.500000e-01 1.462500e-08 9.500000e-01 1.512400e-08 9.500000e-01 1.512500e-08 9.500000e-01)
+VCK_pulse ck_pulse 0 PULSE(0 1.8 2.375000e-10 2.500000e-11 2.500000e-11 2.250000e-10 5.000000e-10)
+VCK_dc ck ck_pulse DC 0
+
+* Transient PWL + Differential DC/AC Balun + Configurable Thevenin Source Impedance
+Vinp src_p_tr 0 PWL(0.000000e+00 9.500000e-01 6.240000e-10 9.500000e-01 6.250000e-10 8.500000e-01 1.124000e-09 8.500000e-01 1.125000e-09 8.500000e-01 1.624000e-09 8.500000e-01 1.625000e-09 8.500000e-01 2.124000e-09 8.500000e-01 2.125000e-09 8.500000e-01 2.624000e-09 8.500000e-01 2.625000e-09 8.500000e-01 3.124000e-09 8.500000e-01 3.125000e-09 8.500000e-01 3.624000e-09 8.500000e-01 3.625000e-09 8.500000e-01 4.124000e-09 8.500000e-01 4.125000e-09 8.500000e-01 4.624000e-09 8.500000e-01 4.625000e-09 8.500000e-01 5.124000e-09 8.500000e-01 5.125000e-09 8.500000e-01 5.624000e-09 8.500000e-01 5.625000e-09 8.500000e-01 6.124000e-09 8.500000e-01 6.125000e-09 8.500000e-01 6.624000e-09 8.500000e-01 6.625000e-09 8.500000e-01 7.124000e-09 8.500000e-01 7.125000e-09 8.500000e-01 7.624000e-09 8.500000e-01 7.625000e-09 8.500000e-01 8.124000e-09 8.500000e-01 8.125000e-09 8.500000e-01 8.624000e-09 8.500000e-01 8.625000e-09 8.500000e-01 9.124000e-09 8.500000e-01 9.125000e-09 8.500000e-01 9.624000e-09 8.500000e-01 9.625000e-09 8.500000e-01 1.012400e-08 8.500000e-01 1.012500e-08 8.500000e-01 1.062400e-08 8.500000e-01 1.062500e-08 8.500000e-01 1.112400e-08 8.500000e-01 1.112500e-08 8.500000e-01 1.162400e-08 8.500000e-01 1.162500e-08 8.500000e-01 1.212400e-08 8.500000e-01 1.212500e-08 8.500000e-01 1.262400e-08 8.500000e-01 1.262500e-08 8.500000e-01 1.312400e-08 8.500000e-01 1.312500e-08 8.500000e-01 1.362400e-08 8.500000e-01 1.362500e-08 8.500000e-01 1.412400e-08 8.500000e-01 1.412500e-08 8.500000e-01 1.462400e-08 8.500000e-01 1.462500e-08 8.500000e-01 1.512400e-08 8.500000e-01 1.512500e-08 8.500000e-01)
+Vinn src_n_tr 0 PWL(0.000000e+00 8.500000e-01 6.240000e-10 8.500000e-01 6.250000e-10 9.500000e-01 1.124000e-09 9.500000e-01 1.125000e-09 9.500000e-01 1.624000e-09 9.500000e-01 1.625000e-09 9.500000e-01 2.124000e-09 9.500000e-01 2.125000e-09 9.500000e-01 2.624000e-09 9.500000e-01 2.625000e-09 9.500000e-01 3.124000e-09 9.500000e-01 3.125000e-09 9.500000e-01 3.624000e-09 9.500000e-01 3.625000e-09 9.500000e-01 4.124000e-09 9.500000e-01 4.125000e-09 9.500000e-01 4.624000e-09 9.500000e-01 4.625000e-09 9.500000e-01 5.124000e-09 9.500000e-01 5.125000e-09 9.500000e-01 5.624000e-09 9.500000e-01 5.625000e-09 9.500000e-01 6.124000e-09 9.500000e-01 6.125000e-09 9.500000e-01 6.624000e-09 9.500000e-01 6.625000e-09 9.500000e-01 7.124000e-09 9.500000e-01 7.125000e-09 9.500000e-01 7.624000e-09 9.500000e-01 7.625000e-09 9.500000e-01 8.124000e-09 9.500000e-01 8.125000e-09 9.500000e-01 8.624000e-09 9.500000e-01 8.625000e-09 9.500000e-01 9.124000e-09 9.500000e-01 9.125000e-09 9.500000e-01 9.624000e-09 9.500000e-01 9.625000e-09 9.500000e-01 1.012400e-08 9.500000e-01 1.012500e-08 9.500000e-01 1.062400e-08 9.500000e-01 1.062500e-08 9.500000e-01 1.112400e-08 9.500000e-01 1.112500e-08 9.500000e-01 1.162400e-08 9.500000e-01 1.162500e-08 9.500000e-01 1.212400e-08 9.500000e-01 1.212500e-08 9.500000e-01 1.262400e-08 9.500000e-01 1.262500e-08 9.500000e-01 1.312400e-08 9.500000e-01 1.312500e-08 9.500000e-01 1.362400e-08 9.500000e-01 1.362500e-08 9.500000e-01 1.412400e-08 9.500000e-01 1.412500e-08 9.500000e-01 1.462400e-08 9.500000e-01 1.462500e-08 9.500000e-01 1.512400e-08 9.500000e-01 1.512500e-08 9.500000e-01)
+Vid id_in 0 DC 0 AC 1.0
+Einp src_p src_p_tr id_in 0 0.5
+Einn src_n src_n_tr id_in 0 -0.5
+Rinp src_p inp 1e-3 noisy=0
+Rinn src_n inn 1e-3 noisy=0
+
+* Switchable DC-bias chokes (isolated during transient, connected for AC/noise/offset)
+Rchoke_x X x_choke 1e12 noisy=0
+Rchoke_y Y y_choke 1e12 noisy=0
+LX x_choke vdd 1e6
+LY y_choke vdd 1e6
+
+* Zero-volt gate mismatch sensitivity probes (0V short in tran/AC/noise, perturbed in 1-pt AC for offset)
+Vos_n yg3 Y DC 0 AC 0
+Vos_p yg5 Y DC 0 AC 0
+Vos_r ckr1 ck DC 0 AC 0
+
+* StrongARM Comparator Core
 XM1 P inp tail 0 sky130_fd_pr__nfet_01v8 W={W_IN} L={L_IN} AD=1.2963 AS=1.2963 PD=9.52 PS=9.52
 XM2 Q inn tail 0 sky130_fd_pr__nfet_01v8 W={W_IN} L={L_IN} AD=1.2963 AS=1.2963 PD=9.52 PS=9.52
-XM3 X Y P 0 sky130_fd_pr__nfet_01v8 W={W_N} L={L_N} AD=1.2963 AS=1.2963 PD=9.52 PS=9.52
+XM3 X yg3 P 0 sky130_fd_pr__nfet_01v8 W={W_N} L={L_N} AD=1.2963 AS=1.2963 PD=9.52 PS=9.52
 XM4 Y X Q 0 sky130_fd_pr__nfet_01v8 W={W_N} L={L_N} AD=1.2963 AS=1.2963 PD=9.52 PS=9.52
-XM5 X Y vdd vdd sky130_fd_pr__pfet_01v8 W={W_P} L={L_P} AD=1.5892 AS=1.5892 PD=11.54 PS=11.54
+XM5 X yg5 vdd vdd sky130_fd_pr__pfet_01v8 W={W_P} L={L_P} AD=1.5892 AS=1.5892 PD=11.54 PS=11.54
 XM6 Y X vdd vdd sky130_fd_pr__pfet_01v8 W={W_P} L={L_P} AD=1.5892 AS=1.5892 PD=11.54 PS=11.54
 XM7 tail ck 0 0 sky130_fd_pr__nfet_01v8 W={W_TAIL} L={L_N} AD=1.5892 AS=1.5892 PD=11.54 PS=11.54
 XM8 P ck Q vdd sky130_fd_pr__pfet_01v8 W={W_EQ} L={L_EQ} AD=1.2963 AS=1.2963 PD=9.52 PS=9.52
-XMr1 X ck vdd vdd sky130_fd_pr__pfet_01v8 W={W_RST} L={L_RST} AD=1.2963 AS=1.2963 PD=9.52 PS=9.52
+XMr1 X ckr1 vdd vdd sky130_fd_pr__pfet_01v8 W={W_RST} L={L_RST} AD=1.2963 AS=1.2963 PD=9.52 PS=9.52
 XMr2 Y ck vdd vdd sky130_fd_pr__pfet_01v8 W={W_RST} L={L_RST} AD=1.2963 AS=1.2963 PD=9.52 PS=9.52
 CLx X 0 5.000000e-15
 CLy Y 0 5.000000e-15
+
 .control
-
-* =====================================================
-* STRONGARM TRANSIENT SIMULATION
-* =====================================================
-
 set wr_singlescale
 set wr_vecnames
 
-* Transient analysis
-* Timestep = 0.833 ps
-* Stop time = 16 ns
+* =====================================================
+* 1. TRANSIENT: DELAY, POWER, ENERGY, OUTPUT SWING
+* =====================================================
 tran 8.333333e-13 1.600000e-08
-
-* =====================================================
-* OUTPUT DIFFERENTIAL
-* =====================================================
-
+set pl_tran = $curplot
 let vdiff = v(X)-v(Y)
-
-* =====================================================
-* INSTANTANEOUS POWER
-* Positive means power delivered by VDD
-* =====================================================
-
 let p_inst = -v(vdd)*i(VDD)
-
-* =====================================================
-* POWER MEASUREMENTS
-* Ignore initial startup interval
-* =====================================================
-
 meas tran p_avg AVG p_inst FROM=5n TO=16n
-
 meas tran p_peak MAX p_inst FROM=5n TO=16n
-
 meas tran e_total INTEG p_inst FROM=5n TO=16n
+wrdata transient.txt v(X) v(Y) v(ck) v(inp) v(inn) vdiff i(VDD) p_inst
 
 * =====================================================
-* WAVEFORM EXPORT
+* 2. TRANSIENT KICKBACK NOISE (Rs = 500 ohm, |Vin_diff| = 10 mV)
 * =====================================================
+alter rinp = 500
+alter rinn = 500
+alter vid = 0.09
+tran 8.333333e-13 3.000000e-09
+set pl_kb = $curplot
+let vkb_diff = (v(inp) - v(inn)) - (v(src_p) - v(src_n))
+let vkb_diff_abs = abs(vkb_diff)
+meas tran kb_peak MAX vkb_diff_abs FROM=1n TO=3n
+meas tran kb_rms RMS vkb_diff FROM=1n TO=3n
+wrdata kickback.txt v(inp) v(inn) v(src_p) v(src_n) v(ck) vkb_diff
 
-wrdata build/netlists/strongarm_nominal_tran.txt v(X) v(Y) v(ck) v(inp) v(inn) vdiff i(VDD) p_inst
+* =====================================================
+* 3. SMALL-SIGNAL EVALUATION BIAS (ck = 1.8 V, inp = inn = 0.9 V)
+* =====================================================
+alter rinp = 1e-3
+alter rinn = 1e-3
+alter vid = -0.1
+alter vck_dc = 1.8
+alter rchoke_x = 1e-3
+alter rchoke_y = 1e-3
 
-* =====================================================
-* PRINT RESULTS
-* =====================================================
+* 3a. AC Differential Gain & Bandwidth
+ac dec 25 1 1e11
+wrdata ac.txt v(X) v(Y) v(inp) v(inn)
+
+* 3b. Input-Referred Thermal + Flicker Noise
+noise v(X,Y) Vid dec 25 1 1e11
+setplot previous
+set pl_nspec = $curplot
+wrdata noise.txt inoise_spectrum onoise_spectrum
+let nlen = length(frequency)
+let nseg = nlen - 1
+let idx1 = nlen - 2
+let df = frequency[1, $&nseg] - frequency[0, $&idx1]
+let psd_avg = 0.5 * (onoise_spectrum[1, $&nseg]^2 + onoise_spectrum[0, $&idx1]^2)
+let onoise_rms = sqrt(nseg * mean(psd_avg * df))
+
+* 3c. DCMatch Input-Referred Offset (SKY130 Pelgrom mismatch + BSIM4 small-signal sensitivities)
+ac lin 1 1e3 1e3
+let a_in = mag(v(X) - v(Y))
+set pl_in = $curplot
+
+alter @vid[acmag] = 0.0
+alter @vos_n[acmag] = 1.0
+ac lin 1 1e3 1e3
+let a_n = mag(v(X) - v(Y))
+set pl_n = $curplot
+
+alter @vos_n[acmag] = 0.0
+alter @vos_p[acmag] = 1.0
+ac lin 1 1e3 1e3
+let a_p = mag(v(X) - v(Y))
+set pl_p = $curplot
+
+alter @vos_p[acmag] = 0.0
+alter @vos_r[acmag] = 1.0
+ac lin 1 1e3 1e3
+let a_r = mag(v(X) - v(Y))
+set pl_r = $curplot
+
+let gain_in = {$pl_in}.a_in + 1e-15
+let gain_n  = {$pl_n}.a_n
+let gain_p  = {$pl_p}.a_p
+let gain_r  = {$pl_r}.a_r
+
+let sig_in  = sqrt(2.0) * avt_n / sqrt(cs_w_in * cs_l_in)
+let sig_n   = sqrt(2.0) * avt_n / sqrt(cs_w_n * cs_l_n)
+let sig_p   = sqrt(2.0) * avt_p / sqrt(cs_w_p * cs_l_p)
+let sig_rst = sqrt(2.0) * avt_p / sqrt(cs_w_rst * cs_l_rst)
+
+let vos_sigma_v = sqrt(sig_in^2 + ((gain_n / gain_in) * sig_n)^2 + ((gain_p / gain_in) * sig_p)^2 + ((gain_r / gain_in) * sig_rst)^2)
+let onoise_rms_v = {$pl_nspec}.onoise_rms
+let inoise_rms_v = onoise_rms_v / gain_in
+let kb_peak_v = {$pl_kb}.kb_peak
+let kb_rms_v = {$pl_kb}.kb_rms
+let p_avg_w = {$pl_tran}.p_avg
+let p_peak_w = {$pl_tran}.p_peak
+let e_total_j = {$pl_tran}.e_total
+
+echo "power_w $&p_avg_w" > metrics.txt
+echo "power_peak_w $&p_peak_w" >> metrics.txt
+echo "energy_total_j $&e_total_j" >> metrics.txt
+echo "dc_gain_1khz $&gain_in" >> metrics.txt
+echo "input_referred_offset_v $&vos_sigma_v" >> metrics.txt
+echo "input_referred_noise_v $&inoise_rms_v" >> metrics.txt
+echo "output_referred_noise_v $&onoise_rms_v" >> metrics.txt
+echo "kickback_noise_v $&kb_peak_v" >> metrics.txt
+echo "kickback_rms_v $&kb_rms_v" >> metrics.txt
 
 echo =========================================
 echo STRONGARM SIMULATION RESULTS
 echo =========================================
-
-print p_avg
-print p_peak
-print e_total
-
+print p_avg_w p_peak_w e_total_j
+print gain_in vos_sigma_v inoise_rms_v onoise_rms_v kb_peak_v kb_rms_v
 echo =========================================
 
 .endc

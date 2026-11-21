@@ -12,9 +12,11 @@ class StrongArmMetrics:
     delay_s: float
     power_w: float
     input_referred_offset_v: float
+    input_referred_noise_v: float
     kickback_noise_v: float
     output_swing_v: float
     fmax_hz: float
+    dc_gain_v_per_v: float = float("nan")
     energy_j: float = float("nan")
     output: Dict[str, float] | None = None
 

@@ -1,4 +1,4 @@
-"""Summarize input-referred offset samples from a CSV file."""
+"""Extract input-referred offset from ngspice scalar metrics or Monte Carlo CSV samples."""
 from __future__ import annotations
 
 import argparse
@@ -11,6 +11,25 @@ from typing import Sequence
 import numpy as np
 
 from scripts._common import write_json
+from scripts.waveform_io import load_scalar_metrics
+
+
+def extract_offset_metric(
+    metrics_path: str | Path,
+    *,
+    key: str = "input_referred_offset_v",
+) -> dict[str, float]:
+    """Read input-referred offset magnitude from a unified ngspice scalar metrics file."""
+    scalars = load_scalar_metrics(metrics_path)
+    if key not in scalars:
+        raise ValueError(f"metrics file {metrics_path} does not contain {key!r}")
+    offset_v = float(scalars[key])
+    if not math.isfinite(offset_v) or offset_v < 0.0:
+        raise ValueError(f"invalid input-referred offset value: {offset_v}")
+    return {
+        "input_referred_offset_v": offset_v,
+        "offset_v": offset_v,
+    }
 
 
 def extract_offset(csv_path: str | Path, column: str = "vos") -> dict:
@@ -45,13 +64,17 @@ def extract_offset(csv_path: str | Path, column: str = "vos") -> dict:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Parse offset CSV options and print the resulting summary."""
+    """Parse offset file options and print the resulting offset metrics."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("csv_file", type=Path)
+    parser.add_argument("input_file", type=Path)
     parser.add_argument("--column", default="vos")
+    parser.add_argument("--key", default="input_referred_offset_v")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
-    result = extract_offset(args.csv_file, args.column)
+    if args.input_file.suffix.lower() == ".csv":
+        result = extract_offset(args.input_file, args.column)
+    else:
+        result = extract_offset_metric(args.input_file, key=args.key)
     if args.output:
         write_json(args.output, result)
     print(json.dumps(result, indent=2))

@@ -14,12 +14,14 @@ class SACController(RLController):
 
     def __init__(self, environment: DirectEvaluationEnv, seed: int, timesteps: int):
         super().__init__(environment=environment, seed=seed)
+        batch_size = min(16, max(2, timesteps))
+        learning_starts = min(16, max(1, timesteps // 2))
         self.model = SAC(
             "MlpPolicy",
             environment,
-            learning_starts=16,
+            learning_starts=learning_starts,
             buffer_size=max(1000, timesteps * 2),
-            batch_size=16,
+            batch_size=batch_size,
             train_freq=1,
             gradient_steps=1,
             gamma=0.95,

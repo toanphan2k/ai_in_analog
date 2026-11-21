@@ -18,9 +18,12 @@ import yaml
 
 from runner.mock_runner import MockRunner
 from runner.ngspice_runner import NgspiceRun
-from scripts.deck_generation import render_gain_deck, render_transient_deck
+from scripts.deck_generation import render_sized_deck
 from scripts.extract_delay import extract_delay
 from scripts.extract_gain import extract_gain
+from scripts.extract_kickback import extract_kickback
+from scripts.extract_noise import extract_noise
+from scripts.extract_offset import extract_offset_metric
 from scripts.netlist_tools import load_sizing_config
 from src.rl_nrbo import optimize_with_rl_nrbo
 from src.selector import variable_names
@@ -145,7 +148,12 @@ def _load_score_config(netlist_dir: Path) -> tuple[dict, Path]:
     return payload, path
 
 
-def _run_ngspice(runner: NgspiceRun, deck: Path, workdir: Path, waveform: Path) -> None:
+def _run_ngspice(
+    runner: NgspiceRun,
+    deck: Path,
+    workdir: Path,
+    expected_outputs: Sequence[Path],
+) -> None:
     result = runner.run(deck.resolve(), workdir.resolve(), execute=True)
     if result.get("returncode") != 0:
         raise RuntimeError(
@@ -155,8 +163,15 @@ def _run_ngspice(runner: NgspiceRun, deck: Path, workdir: Path, waveform: Path) 
     log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
     if "fatal error" in log_text.lower():
         raise RuntimeError("ngspice reported a fatal error; see ngspice.log")
-    if not waveform.is_file() or waveform.stat().st_size == 0:
-        raise RuntimeError("ngspice did not produce the expected waveform; see ngspice.log")
+    missing = [
+        output.name
+        for output in expected_outputs
+        if not output.is_file() or output.stat().st_size == 0
+    ]
+    if missing:
+        raise RuntimeError(
+            f"ngspice did not produce expected output(s) ({', '.join(missing)}); see ngspice.log"
+        )
 
 
 def _evaluate_sample(
@@ -197,46 +212,77 @@ def _evaluate_sample(
         _atomic_json(sample_dir / "result.json", record)
         return record
 
-    delay_dir = sample_dir / "delay"
-    delay_dir.mkdir()
-    transient_name = "transient.txt"
-    transient_deck = delay_dir / "transient.spice"
-    transient_waveform = delay_dir / transient_name
-    deck_text = render_transient_deck(template, sizes, sizing_config, transient_name)
-    transient_deck.write_text(deck_text, encoding="utf-8")
-    record["files"].update(
-        delay_deck=str(transient_deck.relative_to(run_dir)),
-        transient=str(transient_waveform.relative_to(run_dir)),
-    )
-    try:
-        _run_ngspice(runner, transient_deck, delay_dir, transient_waveform)
-        power_window = transient_config.get("power_window_s")
-        metrics = extract_delay(
-            transient_waveform,
-            float(transient_config["vdd_v"]),
-            float(transient_config["period_s"]),
-            output_positive=str(transient_config.get("output_positive", "v(x)")),
-            output_negative=str(transient_config.get("output_negative", "v(y)")),
-            clock_vector=str(transient_config.get("clock_vector", "v(ck)")),
-            power_vector=str(transient_config.get("power_vector", "p_inst")),
-            power_from_s=float(power_window[0]) if power_window else None,
-            power_to_s=float(power_window[1]) if power_window else None,
-        )
-        record["metrics"].update(metrics)
-    except EVALUATION_ERRORS as exc:
-        record["error"] = f"transient: {type(exc).__name__}: {exc}"
+    deck_path = sample_dir / "netlist.spice"
+    deck_text = render_sized_deck(template, sizes, sizing_config)
+    deck_path.write_text(deck_text, encoding="utf-8")
 
+    transient_waveform = sample_dir / str(transient_config.get("waveform", "transient.txt"))
     gain_config = analyses.get("gain", {})
+    gain_waveform = sample_dir / str(gain_config.get("waveform", "ac.txt"))
+    offset_config = analyses.get("offset", {})
+    offset_metrics_file = sample_dir / str(offset_config.get("metrics_file", "metrics.txt"))
+    noise_config = analyses.get("noise", {})
+    noise_waveform = sample_dir / str(noise_config.get("waveform", "noise.txt"))
+    noise_metrics_file = sample_dir / str(noise_config.get("metrics_file", "metrics.txt"))
+    kickback_config = analyses.get("kickback", {})
+    kickback_waveform = sample_dir / str(kickback_config.get("waveform", "kickback.txt"))
+
+    expected_outputs: list[Path] = []
+    if transient_config.get("enabled", True):
+        expected_outputs.append(transient_waveform)
     if gain_config.get("enabled", False):
-        gain_dir = sample_dir / "gain"
-        gain_dir.mkdir()
-        gain_name = "ac.txt"
-        gain_deck = gain_dir / "gain.spice"
-        gain_waveform = gain_dir / gain_name
+        expected_outputs.append(gain_waveform)
+    if offset_config.get("enabled", False):
+        expected_outputs.append(offset_metrics_file)
+    if noise_config.get("enabled", False):
+        expected_outputs.append(noise_waveform)
+    if kickback_config.get("enabled", False):
+        expected_outputs.append(kickback_waveform)
+    deduped_outputs = list(dict.fromkeys(expected_outputs))
+
+    record["files"].update(
+        deck=str(deck_path.relative_to(run_dir)),
+        log=str((sample_dir / "ngspice.log").relative_to(run_dir)),
+        **{
+            key: str(path.relative_to(run_dir))
+            for key, enabled, path in (
+                ("transient", transient_config.get("enabled", True), transient_waveform),
+                ("ac", gain_config.get("enabled", False), gain_waveform),
+                ("noise", noise_config.get("enabled", False), noise_waveform),
+                ("kickback", kickback_config.get("enabled", False), kickback_waveform),
+                ("metrics", offset_config.get("enabled", False), offset_metrics_file),
+            )
+            if enabled
+        },
+    )
+
+    errors: list[str] = []
+    try:
+        _run_ngspice(runner, deck_path, sample_dir, deduped_outputs)
+    except EVALUATION_ERRORS as exc:
+        record["error"] = f"ngspice: {type(exc).__name__}: {exc}"
+        _atomic_json(sample_dir / "result.json", record)
+        return record
+
+    if transient_config.get("enabled", True):
         try:
-            gain_text = render_gain_deck(template, sizes, sizing_config, gain_name)
-            gain_deck.write_text(gain_text, encoding="utf-8")
-            _run_ngspice(runner, gain_deck, gain_dir, gain_waveform)
+            power_window = transient_config.get("power_window_s")
+            record["metrics"].update(extract_delay(
+                transient_waveform,
+                float(transient_config["vdd_v"]),
+                float(transient_config["period_s"]),
+                output_positive=str(transient_config.get("output_positive", "v(X)")),
+                output_negative=str(transient_config.get("output_negative", "v(Y)")),
+                clock_vector=str(transient_config.get("clock_vector", "v(ck)")),
+                power_vector=str(transient_config.get("power_vector", "p_inst")),
+                power_from_s=float(power_window[0]) if power_window else None,
+                power_to_s=float(power_window[1]) if power_window else None,
+            ))
+        except EVALUATION_ERRORS as exc:
+            errors.append(f"transient: {type(exc).__name__}: {exc}")
+
+    if gain_config.get("enabled", False):
+        try:
             record["metrics"].update(extract_gain(
                 gain_waveform,
                 output_positive=str(gain_config.get("output_positive", "v(X)")),
@@ -245,9 +291,43 @@ def _evaluate_sample(
                 input_negative=str(gain_config.get("input_negative", "v(inn)")),
             ))
         except EVALUATION_ERRORS as exc:
-            reason = f"gain: {type(exc).__name__}: {exc}"
-            record["error"] = f"{record['error']}; {reason}".strip("; ")
+            errors.append(f"gain: {type(exc).__name__}: {exc}")
 
+    if offset_config.get("enabled", False):
+        try:
+            record["metrics"].update(extract_offset_metric(
+                offset_metrics_file,
+                key=str(offset_config.get("key", "input_referred_offset_v")),
+            ))
+        except EVALUATION_ERRORS as exc:
+            errors.append(f"offset: {type(exc).__name__}: {exc}")
+
+    if noise_config.get("enabled", False):
+        try:
+            record["metrics"].update(extract_noise(
+                noise_waveform,
+                dc_gain_v_per_v=record["metrics"].get("dc_gain_v_per_v"),
+                metrics_path=noise_metrics_file,
+                output_spectrum=str(noise_config.get("output_spectrum", "onoise_spectrum")),
+            ))
+        except EVALUATION_ERRORS as exc:
+            errors.append(f"noise: {type(exc).__name__}: {exc}")
+
+    if kickback_config.get("enabled", False):
+        try:
+            kb_window = kickback_config.get("window_s", (1.0e-9, 3.0e-9))
+            record["metrics"].update(extract_kickback(
+                kickback_waveform,
+                from_s=float(kb_window[0]),
+                to_s=float(kb_window[1]),
+                differential_vector=str(
+                    kickback_config.get("differential_vector", "vkb_diff")
+                ),
+            ))
+        except EVALUATION_ERRORS as exc:
+            errors.append(f"kickback: {type(exc).__name__}: {exc}")
+
+    record["error"] = "; ".join(errors)
     delay = record["metrics"].get("delay_s")
     period_s = float(transient_config.get("period_s", 0.0))
     power = record["metrics"].get("power_w")
