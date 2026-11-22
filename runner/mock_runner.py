@@ -42,6 +42,7 @@ class MockRunner:
             + jitter
         )
         delay_s = 4.5e-10 * float(np.exp(log_delay))
+        reset_time_s = 2.8e-10 * float(np.exp(-0.9 * axes[4] + 0.25 * axes[0] + 0.5 * jitter))
         width_terms = [
             float(sizes[name])
             for name in ("w_in", "w_n", "w_p", "w_rst", "w_tail", "w_8")
@@ -65,11 +66,14 @@ class MockRunner:
         failed = rng.random() < self.failure_rate
         comparison_period_s = 5.0e-10
         energy_j = power_w * comparison_period_s
+        speed_hz = 1.0 / (2.0 * max(delay_s, reset_time_s))
         metrics = {
             "delay_s": delay_s,
             "delay_mean_s": delay_s * (1.0 + abs(jitter)),
-            "speed_hz": 1.0 / delay_s,
-            "cycles_measured": 20,
+            "reset_time_s": reset_time_s,
+            "reset_time_mean_s": reset_time_s * (1.0 + abs(jitter) * 0.5),
+            "speed_hz": speed_hz,
+            "cycles_measured": 32,
             "power_w": power_w,
             "energy_j": energy_j,
             "energy_per_comparison_j": energy_j,

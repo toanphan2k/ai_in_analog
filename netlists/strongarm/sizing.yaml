@@ -63,7 +63,12 @@ analyses:
     output_positive: "v(X)"
     output_negative: "v(Y)"
     clock_vector: "v(ck)"
+    input_positive: "v(inp)"
+    input_negative: "v(inn)"
     power_vector: "p_inst"
+    reset_threshold_ratio: 0.9
+    inverting: true
+    check_polarity: true
   gain:
     enabled: true
     waveform: "ac.txt"

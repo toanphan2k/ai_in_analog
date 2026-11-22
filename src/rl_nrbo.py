@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -64,6 +64,7 @@ def optimize_with_rl_nrbo(
     score_candidate: Callable[[Mapping], float],
     is_feasible: Callable[[Mapping], bool],
     checkpoint_dir: str | Path,
+    evaluate_candidates: Callable[[Sequence[np.ndarray], int], Sequence[Mapping]] | None = None,
     resume_model: str | Path | None = None,
     initial_iteration: int = 0,
 ) -> list[dict]:
@@ -82,6 +83,7 @@ def optimize_with_rl_nrbo(
         episode_length=episode_length,
         seed=seed,
         evaluate_candidate=evaluate_candidate,
+        evaluate_candidates=evaluate_candidates,
         score_candidate=score_candidate,
         is_feasible=is_feasible,
         next_population=_next_population,

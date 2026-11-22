@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,8 @@ RESULT_PREFIX_COLUMNS = (
 RESULT_METRIC_COLUMNS = (
     "delay_s",
     "delay_mean_s",
+    "reset_time_s",
+    "reset_time_mean_s",
     "speed_hz",
     "cycles_measured",
     "power_w",
@@ -188,14 +191,291 @@ def _load_score_config(netlist_dir: Path) -> tuple[dict, Path]:
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"score config must contain a YAML mapping: {path}")
+    scoring = payload.get("scoring", {})
     weights = payload.get("weights")
     references = payload.get("references")
     constraints = payload.get("constraints", {})
+    penalty = payload.get("penalty", {})
+    if scoring is None:
+        scoring = {}
+    if constraints is None:
+        constraints = {}
+    if penalty is None:
+        penalty = {}
+    if not isinstance(scoring, dict):
+        raise ValueError("score config 'scoring' must be a mapping")
     if not isinstance(weights, dict) or not isinstance(references, dict):
         raise ValueError("score config must define 'weights' and 'references'")
     if not isinstance(constraints, dict):
         raise ValueError("score config 'constraints' must be a mapping")
+    if not isinstance(penalty, dict):
+        raise ValueError("score config 'penalty' must be a mapping")
+    payload["scoring"] = scoring
+    payload["constraints"] = constraints
+    payload["penalty"] = penalty
     return payload, path
+
+
+def _parse_optional_positive(mapping: Mapping[str, Any], key: str) -> float | None:
+    raw = mapping.get(key)
+    if raw is None:
+        return None
+    value = float(raw)
+    if value <= 0.0 or not math.isfinite(value):
+        raise ValueError(f"{key} must be finite and positive")
+    return value
+
+
+def _finite_metric(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def resolve_score_config(
+    score_config: Mapping[str, Any],
+    sizing_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate and resolve scoring, weights, references, constraints, and penalties."""
+    scoring = score_config.get("scoring") or {}
+    weights = score_config["weights"]
+    references = score_config["references"]
+    constraints = score_config.get("constraints") or {}
+    penalty = score_config.get("penalty") or {}
+
+    objective = str(scoring.get("objective", "minimize")).strip().lower()
+    if objective != "minimize":
+        raise ValueError(f"unsupported scoring.objective {objective!r}; only 'minimize' is supported")
+    infeasible_score = float(scoring.get("infeasible_score", 1000.0))
+    if infeasible_score <= 0.0 or not math.isfinite(infeasible_score):
+        raise ValueError("scoring.infeasible_score must be finite and positive")
+
+    delay_weight = float(weights.get("delay", 1.0))
+    power_weight = float(weights.get("power", 0.0))
+    energy_weight = float(weights.get("energy", 0.0))
+    offset_weight = float(weights.get("offset", 0.0))
+    noise_weight = float(weights.get("noise", 0.0))
+    kickback_weight = float(weights.get("kickback", 0.0))
+
+    default_delay_reference_s = float(
+        sizing_config.get("analyses", {}).get("transient", {}).get("period_s", 1e-9)
+    )
+    delay_reference_s = float(references.get("delay_s", default_delay_reference_s))
+    power_reference_w = float(references.get("power_w", 0.01))
+    energy_reference_j = float(references.get("energy_j", 1e-15))
+    offset_reference_v = float(references.get("offset_v", 1e-3))
+    noise_reference_v = float(references.get("noise_v", 1e-3))
+    kickback_reference_v = float(references.get("kickback_v", 1e-3))
+
+    resolved_weights = (
+        delay_weight,
+        power_weight,
+        energy_weight,
+        offset_weight,
+        noise_weight,
+        kickback_weight,
+    )
+    resolved_references = (
+        delay_reference_s,
+        power_reference_w,
+        energy_reference_j,
+        offset_reference_v,
+        noise_reference_v,
+        kickback_reference_v,
+    )
+    if any(weight < 0.0 or not math.isfinite(weight) for weight in resolved_weights):
+        raise ValueError("objective weights must be finite and nonnegative")
+    if sum(resolved_weights) == 0.0:
+        raise ValueError("at least one objective weight must be positive")
+    if any(reference <= 0.0 or not math.isfinite(reference) for reference in resolved_references):
+        raise ValueError("metric references must be finite and positive")
+
+    max_delay_s = _parse_optional_positive(constraints, "max_delay_s")
+    max_power_w = _parse_optional_positive(constraints, "max_power_w")
+    max_offset_v = _parse_optional_positive(constraints, "max_offset_v")
+    max_noise_v = _parse_optional_positive(constraints, "max_noise_v")
+    max_kickback_v = _parse_optional_positive(constraints, "max_kickback_v")
+    min_output_swing_v = _parse_optional_positive(constraints, "min_output_swing_v")
+
+    penalty_lambda = float(penalty.get("lambda", 100.0))
+    if penalty_lambda < 0.0 or not math.isfinite(penalty_lambda):
+        raise ValueError("penalty.lambda must be finite and nonnegative")
+    penalty_type = str(penalty.get("type", "quadratic")).strip().lower()
+    if penalty_type not in {"quadratic", "linear"}:
+        raise ValueError(
+            f"unsupported penalty.type {penalty_type!r}; expected 'quadratic' or 'linear'"
+        )
+
+    return {
+        "objective": objective,
+        "infeasible_score": infeasible_score,
+        "delay_weight": delay_weight,
+        "power_weight": power_weight,
+        "energy_weight": energy_weight,
+        "offset_weight": offset_weight,
+        "noise_weight": noise_weight,
+        "kickback_weight": kickback_weight,
+        "delay_reference_s": delay_reference_s,
+        "power_reference_w": power_reference_w,
+        "energy_reference_j": energy_reference_j,
+        "offset_reference_v": offset_reference_v,
+        "noise_reference_v": noise_reference_v,
+        "kickback_reference_v": kickback_reference_v,
+        "max_delay_s": max_delay_s,
+        "max_power_w": max_power_w,
+        "max_offset_v": max_offset_v,
+        "max_noise_v": max_noise_v,
+        "max_kickback_v": max_kickback_v,
+        "min_output_swing_v": min_output_swing_v,
+        "penalty_lambda": penalty_lambda,
+        "penalty_type": penalty_type,
+    }
+
+
+def _extract_scored_metrics(record: Mapping[str, Any]) -> dict[str, float | None]:
+    metrics = record.get("metrics", {})
+    delay = _finite_metric(metrics.get("delay_s"))
+    power = _finite_metric(metrics.get("power_w"))
+    energy = _finite_metric(metrics.get("energy_per_comparison_j", metrics.get("energy_j")))
+    offset = _finite_metric(metrics.get("input_referred_offset_v", metrics.get("offset_v")))
+    noise = _finite_metric(metrics.get("input_referred_noise_v"))
+    kickback = _finite_metric(metrics.get("kickback_noise_v"))
+    output_swing = _finite_metric(metrics.get("output_swing_v"))
+    return {
+        "delay_s": delay,
+        "power_w": power,
+        "energy_j": energy,
+        "offset_v": offset,
+        "noise_v": noise,
+        "kickback_v": kickback,
+        "output_swing_v": output_swing,
+    }
+
+
+def compute_objective_score(
+    record: Mapping[str, Any],
+    resolved: Mapping[str, Any],
+) -> float:
+    """Compute S_total (lower is better) with normalized terms and constraint penalties."""
+    infeasible_score = float(resolved["infeasible_score"])
+    if record.get("status") == "failed":
+        return infeasible_score
+
+    m = _extract_scored_metrics(record)
+    delay = m["delay_s"]
+    power = m["power_w"]
+    energy = m["energy_j"]
+    offset = m["offset_v"]
+    noise = m["noise_v"]
+    kickback = m["kickback_v"]
+    output_swing = m["output_swing_v"]
+
+    if (
+        (resolved["delay_weight"] > 0.0 and delay is None)
+        or (resolved["power_weight"] > 0.0 and power is None)
+        or (resolved["energy_weight"] > 0.0 and energy is None)
+        or (resolved["offset_weight"] > 0.0 and offset is None)
+        or (resolved["noise_weight"] > 0.0 and noise is None)
+        or (resolved["kickback_weight"] > 0.0 and kickback is None)
+        or (resolved["max_delay_s"] is not None and delay is None)
+        or (resolved["max_power_w"] is not None and power is None)
+        or (resolved["max_offset_v"] is not None and offset is None)
+        or (resolved["max_noise_v"] is not None and noise is None)
+        or (resolved["max_kickback_v"] is not None and kickback is None)
+        or (resolved["min_output_swing_v"] is not None and output_swing is None)
+    ):
+        return infeasible_score
+
+    value = 0.0
+    if resolved["delay_weight"] > 0.0:
+        value += resolved["delay_weight"] * (delay / resolved["delay_reference_s"])
+    if resolved["power_weight"] > 0.0:
+        value += resolved["power_weight"] * (power / resolved["power_reference_w"])
+    if resolved["energy_weight"] > 0.0:
+        value += resolved["energy_weight"] * (energy / resolved["energy_reference_j"])
+    if resolved["offset_weight"] > 0.0:
+        value += resolved["offset_weight"] * (abs(offset) / resolved["offset_reference_v"])
+    if resolved["noise_weight"] > 0.0:
+        value += resolved["noise_weight"] * (noise / resolved["noise_reference_v"])
+    if resolved["kickback_weight"] > 0.0:
+        value += resolved["kickback_weight"] * (kickback / resolved["kickback_reference_v"])
+
+    violations: list[float] = []
+    if resolved["max_power_w"] is not None:
+        violations.append(max(0.0, power / resolved["max_power_w"] - 1.0))
+    if resolved["max_delay_s"] is not None:
+        violations.append(max(0.0, delay / resolved["max_delay_s"] - 1.0))
+    if resolved["max_offset_v"] is not None:
+        violations.append(max(0.0, abs(offset) / resolved["max_offset_v"] - 1.0))
+    if resolved["max_noise_v"] is not None:
+        violations.append(max(0.0, noise / resolved["max_noise_v"] - 1.0))
+    if resolved["max_kickback_v"] is not None:
+        violations.append(max(0.0, kickback / resolved["max_kickback_v"] - 1.0))
+    if resolved["min_output_swing_v"] is not None:
+        violations.append(
+            max(0.0, (resolved["min_output_swing_v"] - output_swing) / resolved["min_output_swing_v"])
+        )
+
+    penalty_lambda = float(resolved["penalty_lambda"])
+    if penalty_lambda > 0.0 and violations:
+        if resolved["penalty_type"] == "quadratic":
+            value += penalty_lambda * sum(g * g for g in violations)
+        else:
+            value += penalty_lambda * sum(violations)
+
+    return float(value) if math.isfinite(value) else infeasible_score
+
+
+def is_record_feasible(
+    record: Mapping[str, Any],
+    resolved: Mapping[str, Any],
+) -> bool:
+    """Return True iff the candidate succeeded, has all required metrics, and meets all constraints."""
+    if record.get("status") == "failed":
+        return False
+
+    m = _extract_scored_metrics(record)
+    delay = m["delay_s"]
+    power = m["power_w"]
+    energy = m["energy_j"]
+    offset = m["offset_v"]
+    noise = m["noise_v"]
+    kickback = m["kickback_v"]
+    output_swing = m["output_swing_v"]
+
+    if (
+        (resolved["delay_weight"] > 0.0 and delay is None)
+        or (resolved["power_weight"] > 0.0 and power is None)
+        or (resolved["energy_weight"] > 0.0 and energy is None)
+        or (resolved["offset_weight"] > 0.0 and offset is None)
+        or (resolved["noise_weight"] > 0.0 and noise is None)
+        or (resolved["kickback_weight"] > 0.0 and kickback is None)
+    ):
+        return False
+
+    if resolved["max_delay_s"] is not None and (delay is None or delay > resolved["max_delay_s"]):
+        return False
+    if resolved["max_power_w"] is not None and (power is None or power > resolved["max_power_w"]):
+        return False
+    if resolved["max_offset_v"] is not None and (
+        offset is None or abs(offset) > resolved["max_offset_v"]
+    ):
+        return False
+    if resolved["max_noise_v"] is not None and (noise is None or noise > resolved["max_noise_v"]):
+        return False
+    if resolved["max_kickback_v"] is not None and (
+        kickback is None or kickback > resolved["max_kickback_v"]
+    ):
+        return False
+    if resolved["min_output_swing_v"] is not None and (
+        output_swing is None or output_swing < resolved["min_output_swing_v"]
+    ):
+        return False
+    return True
 
 
 def _run_ngspice(
@@ -328,9 +608,14 @@ def _evaluate_sample(
                 output_positive=str(transient_config.get("output_positive", "v(X)")),
                 output_negative=str(transient_config.get("output_negative", "v(Y)")),
                 clock_vector=str(transient_config.get("clock_vector", "v(ck)")),
+                input_positive=transient_config.get("input_positive", "v(inp)"),
+                input_negative=transient_config.get("input_negative", "v(inn)"),
                 power_vector=str(transient_config.get("power_vector", "p_inst")),
                 power_from_s=float(power_window[0]) if power_window else None,
                 power_to_s=float(power_window[1]) if power_window else None,
+                reset_threshold_ratio=float(transient_config.get("reset_threshold_ratio", 0.9)),
+                inverting=bool(transient_config.get("inverting", True)),
+                check_polarity=bool(transient_config.get("check_polarity", True)),
             ))
         except EVALUATION_ERRORS as exc:
             errors.append(f"transient: {type(exc).__name__}: {exc}")
@@ -383,10 +668,14 @@ def _evaluate_sample(
 
     record["error"] = "; ".join(errors)
     delay = record["metrics"].get("delay_s")
+    reset_time = record["metrics"].get("reset_time_s")
     period_s = float(transient_config.get("period_s", 0.0))
     power = record["metrics"].get("power_w")
     if delay is not None and float(delay) > 0.0:
-        record["metrics"]["speed_hz"] = 1.0 / float(delay)
+        half_period_min_s = float(delay)
+        if reset_time is not None and float(reset_time) > 0.0:
+            half_period_min_s = max(half_period_min_s, float(reset_time))
+        record["metrics"]["speed_hz"] = 1.0 / (2.0 * half_period_min_s)
         record["status"] = "evaluated" if not record["error"] else "partial"
     if power is not None and period_s > 0.0:
         energy = float(power) * period_s
@@ -410,6 +699,7 @@ def run_rl_sizing(
     mock_failure_rate: float,
     run_id: str | None,
     timeout_s: float,
+    workers: int = 1,
     resume: str | None = None,
     verbose: int = 0,
 ) -> Path:
@@ -421,6 +711,8 @@ def run_rl_sizing(
         raise ValueError("runner must be ngspice or mock")
     if samples <= 0 or population_size < 4:
         raise ValueError("samples and population size must be positive")
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
 
     netlist_dir = Path(netlist)
     if not netlist_dir.is_absolute():
@@ -433,47 +725,7 @@ def run_rl_sizing(
 
     sizing_config = load_sizing_config(config_path)
     score_config, score_path = _load_score_config(netlist_dir)
-    weights = score_config["weights"]
-    references = score_config["references"]
-    constraints = score_config["constraints"]
-
-    delay_weight = float(weights.get("delay", 1.0))
-    speed_weight = float(weights.get("speed", 0.0))
-    power_weight = float(weights.get("power", 0.0))
-    energy_weight = float(weights.get("energy", 0.0))
-    offset_weight = float(weights.get("offset", 0.0))
-    noise_weight = float(weights.get("noise", 0.0))
-    kickback_weight = float(weights.get("kickback", 0.0))
-
-    delay_reference_s = float(
-        sizing_config.get("analyses", {}).get("transient", {}).get("period_s", 1e-9)
-    )
-    power_reference_w = float(references.get("power_w", 0.01))
-    energy_reference_j = float(references.get("energy_j", 1e-15))
-    offset_reference_v = float(references.get("offset_v", 1e-3))
-    noise_reference_v = float(references.get("noise_v", 1e-3))
-    kickback_reference_v = float(references.get("kickback_v", 1e-3))
-
-    resolved_weights = (
-        delay_weight, speed_weight, power_weight, energy_weight,
-        offset_weight, noise_weight, kickback_weight,
-    )
-    resolved_references = (
-        delay_reference_s, power_reference_w, energy_reference_j,
-        offset_reference_v, noise_reference_v, kickback_reference_v,
-    )
-    if any(weight < 0.0 or not math.isfinite(weight) for weight in resolved_weights):
-        raise ValueError("objective weights must be finite and nonnegative")
-    if sum(resolved_weights) == 0.0:
-        raise ValueError("at least one objective weight must be positive")
-    if any(reference <= 0.0 or not math.isfinite(reference) for reference in resolved_references):
-        raise ValueError("metric references must be finite and positive")
-
-    max_power_w = constraints.get("max_power_w")
-    if max_power_w is not None:
-        max_power_w = float(max_power_w)
-        if max_power_w <= 0.0 or not math.isfinite(max_power_w):
-            raise ValueError("max_power_w must be finite and positive")
+    resolved = resolve_score_config(score_config, sizing_config)
 
     design_names = variable_names(sizing_config)
     template = template_path.read_text(encoding="utf-8")
@@ -535,22 +787,6 @@ def run_rl_sizing(
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "data").mkdir(parents=True, exist_ok=True)
 
-    resolved = {
-        "delay_weight": delay_weight,
-        "speed_weight": speed_weight,
-        "power_weight": power_weight,
-        "energy_weight": energy_weight,
-        "offset_weight": offset_weight,
-        "noise_weight": noise_weight,
-        "kickback_weight": kickback_weight,
-        "delay_reference_s": delay_reference_s,
-        "power_reference_w": power_reference_w,
-        "energy_reference_j": energy_reference_j,
-        "offset_reference_v": offset_reference_v,
-        "noise_reference_v": noise_reference_v,
-        "kickback_reference_v": kickback_reference_v,
-        "max_power_w": max_power_w,
-    }
     if verbose >= 2:
         print(f"Resolved score: {resolved}", file=sys.stderr)
         print(f"Score config: {score_path}", file=sys.stderr)
@@ -562,6 +798,7 @@ def run_rl_sizing(
         "netlist": str(netlist_dir),
         "seed": seed,
         "population_size": population_size,
+        "workers": workers,
         "rl_timesteps": timesteps,
         "episode_length": episode_length,
         "samples_requested": samples,
@@ -577,7 +814,8 @@ def run_rl_sizing(
     if verbose >= 1:
         print(
             f"Starting {run_id}: algorithm={algorithm}, runner={runner_name}, "
-            f"population={population_size}, timesteps={timesteps}, episodes={episode_length}",
+            f"population={population_size}, workers={workers}, "
+            f"timesteps={timesteps}, episodes={episode_length}",
             file=sys.stderr,
         )
     runner = (
@@ -594,49 +832,10 @@ def run_rl_sizing(
             evaluated_by_vector[key] = existing_sample
 
     def objective_score(record: Mapping) -> float:
-        metrics = record.get("metrics", {})
-        if record.get("status") == "failed":
-            return 1e3
-        delay = metrics.get("delay_s")
-        power = metrics.get("power_w")
-        speed = metrics.get("speed_hz")
-        if speed is None and delay is not None and float(delay) > 0.0:
-            speed = 1.0 / float(delay)
-        energy = metrics.get("energy_per_comparison_j", metrics.get("energy_j"))
-        offset = metrics.get("input_referred_offset_v", metrics.get("offset_v"))
-        noise = metrics.get("input_referred_noise_v")
-        kickback = metrics.get("kickback_noise_v")
-        if delay_weight and delay is None:
-            return 1e3
-        if speed_weight and speed is None:
-            return 1e3
-        if power_weight and power is None:
-            return 1e3
-        if energy_weight and energy is None:
-            return 1e3
-        if offset_weight and offset is None:
-            return 1e3
-        if noise_weight and noise is None:
-            return 1e3
-        if kickback_weight and kickback is None:
-            return 1e3
-        value = delay_weight * (float(delay or 0.0) / delay_reference_s)
-        value -= speed_weight * (float(speed or 0.0) * delay_reference_s)
-        value += power_weight * (float(power or 0.0) / power_reference_w)
-        value += energy_weight * (float(energy or 0.0) / energy_reference_j)
-        value += offset_weight * abs(float(offset or 0.0)) / offset_reference_v
-        value += noise_weight * (float(noise or 0.0) / noise_reference_v)
-        value += kickback_weight * (float(kickback or 0.0) / kickback_reference_v)
-        if max_power_w is not None:
-            violation = max(0.0, float(power or 0.0) / max_power_w - 1.0)
-            value += 100.0 * violation**2
-        return float(value)
+        return compute_objective_score(record, resolved)
 
     def is_feasible(record: Mapping) -> bool:
-        if record.get("status") == "failed":
-            return False
-        power = record.get("metrics", {}).get("power_w")
-        return max_power_w is None or (power is not None and float(power) <= max_power_w)
+        return is_record_feasible(record, resolved)
 
     initial_iteration = max(
         (
@@ -647,20 +846,21 @@ def run_rl_sizing(
         default=0,
     )
 
-    def evaluate_candidate(vector: np.ndarray, iteration: int) -> Mapping:
-        key = tuple(np.round(np.clip(vector, 0.0, 1.0), 10))
-        if key in evaluated_by_vector:
-            return evaluated_by_vector[key]
-        existing_indexes = []
-        for existing in existing_samples:
-            name = str(existing.get("name", ""))
-            suffix = name.rsplit("_", 1)[-1]
-            if suffix.isdigit():
-                existing_indexes.append(int(suffix))
-        index = max(existing_indexes, default=0) + 1
-        sizes = _physical_sizes(sizing_config, vector)
+    existing_indexes = []
+    for existing in existing_samples:
+        name = str(existing.get("name", ""))
+        suffix = name.rsplit("_", 1)[-1]
+        if suffix.isdigit():
+            existing_indexes.append(int(suffix))
+    next_index = max(existing_indexes, default=0) + 1
+
+    def _run_candidate_sample(
+        index: int,
+        vector: np.ndarray,
+        sizes: dict[str, float],
+    ) -> dict[str, Any]:
         try:
-            record = _evaluate_sample(
+            return _evaluate_sample(
                 index,
                 vector,
                 sizes,
@@ -673,7 +873,7 @@ def run_rl_sizing(
         except EVALUATION_ERRORS as exc:
             sample_dir = _sample_dir(run_dir, index)
             sample_dir.mkdir(parents=True, exist_ok=True)
-            record = {
+            return {
                 "name": f"{run_id}_{index:06d}",
                 "status": "failed",
                 "x_norm": [float(value) for value in vector],
@@ -682,6 +882,13 @@ def run_rl_sizing(
                 "files": {},
                 "error": f"{type(exc).__name__}: {exc}",
             }
+
+    def _finalize_record(
+        key: tuple[float, ...],
+        index: int,
+        record: dict[str, Any],
+        iteration: int,
+    ) -> dict[str, Any]:
         record["algorithm"] = algorithm
         record["iteration"] = int(iteration)
         record["seed"] = seed
@@ -717,6 +924,46 @@ def run_rl_sizing(
             _atomic_json(run_dir / "results.json", metadata)
         return record
 
+    def evaluate_candidates(
+        vectors: Sequence[np.ndarray],
+        iteration: int,
+    ) -> list[Mapping]:
+        nonlocal next_index
+        keys: list[tuple[float, ...]] = []
+        pending: list[tuple[tuple[float, ...], int, np.ndarray, dict[str, float]]] = []
+        queued_keys: set[tuple[float, ...]] = set()
+        for vector in vectors:
+            key = tuple(np.round(np.clip(vector, 0.0, 1.0), 10))
+            keys.append(key)
+            if key in evaluated_by_vector or key in queued_keys:
+                continue
+            queued_keys.add(key)
+            index = next_index
+            next_index += 1
+            sizes = _physical_sizes(sizing_config, vector)
+            pending.append((key, index, vector.copy(), sizes))
+
+        if pending:
+            if workers == 1 or len(pending) == 1:
+                for key, index, vector, sizes in pending:
+                    record = _run_candidate_sample(index, vector, sizes)
+                    _finalize_record(key, index, record, iteration)
+            else:
+                max_workers = min(workers, len(pending))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [
+                        (key, index, executor.submit(_run_candidate_sample, index, vector, sizes))
+                        for key, index, vector, sizes in pending
+                    ]
+                    for key, index, future in futures:
+                        record = future.result()
+                        _finalize_record(key, index, record, iteration)
+
+        return [evaluated_by_vector[key] for key in keys]
+
+    def evaluate_candidate(vector: np.ndarray, iteration: int) -> Mapping:
+        return evaluate_candidates([vector], iteration)[0]
+
     candidates = optimize_with_rl_nrbo(
         algorithm=algorithm,
         dimension=len(design_names),
@@ -726,6 +973,7 @@ def run_rl_sizing(
         episode_length=episode_length,
         seed=seed,
         evaluate_candidate=evaluate_candidate,
+        evaluate_candidates=evaluate_candidates,
         score_candidate=objective_score,
         is_feasible=is_feasible,
         checkpoint_dir=run_dir / "checkpoints" / algorithm,

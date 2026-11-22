@@ -4,3 +4,4 @@
 catboost_info
 dataset/*.csv
 dataset/*/
+plot_*/

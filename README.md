@@ -40,6 +40,7 @@ python3 optimize_sizing.py \
   --algorithm PPO \
   --samples 5 \
   --population-size 4 \
+  --workers 1 \
   --rl-timesteps 64 \
   --episode-length 8 \
   --seed 0
@@ -54,6 +55,7 @@ python3 optimize_sizing.py \
   --algorithm SAC \
   --samples 5 \
   --population-size 4 \
+  --workers 1 \
   --rl-timesteps 64 \
   --episode-length 8 \
   --seed 0
@@ -61,67 +63,95 @@ python3 optimize_sizing.py \
 
 PPO is on-policy; SAC is off-policy. Both learn operator controls from measured reward:
 the weighted candidate-score improvement and the fraction of feasible candidates. Score
-weights, metric references, and `constraints.max_power_w` are configured in
-`netlists/<design>/scoring.yaml`; no objective or weight flags are accepted by the CLI.
+objective/sentinel, weights, metric references, constraints, and penalty parameters are configured
+in `netlists/<design>/scoring.yaml`; no objective or weight flags are accepted by the CLI.
 
 ### Score configuration
 
-For a design, editable score weights and references are stored in
-`netlists/<design>/scoring.yaml`. The StrongARM defaults are:
+For a design, editable score settings, weights, references, constraints, and penalty parameters
+are stored in `netlists/<design>/scoring.yaml`. The StrongARM baseline is:
 
 ```yaml
+scoring:
+  objective: minimize
+  infeasible_score: 1000.0
+
 weights:
   delay: 1.0
-  speed: 0.0
-  power: 0.0
-  energy: 0.0
-  offset: 0.0
-  noise: 0.0
-  kickback: 0.0
+  power: 0.5
+  energy: 0.5
+  offset: 1.0
+  noise: 0.5
+  kickback: 1.0
+
 references:
-  delay_s: 5.0e-10
-  power_w: 1.0e-2
-  energy_j: 1.0e-15
-  offset_v: 1.0e-3
-  noise_v: 1.0e-3
-  kickback_v: 1.0e-3
+  delay_s: 2.0e-10
+  power_w: 5.0e-4
+  energy_j: 1.0e-13
+  offset_v: 5.0e-3
+  noise_v: 5.0e-4
+  kickback_v: 2.0e-2
+
 constraints:
-  max_power_w: null
+  max_delay_s: 3.0e-10
+  max_power_w: 5.0e-4
+  max_offset_v: 1.0e-2
+  max_noise_v: 1.0e-3
+  max_kickback_v: 2.0e-2
+  min_output_swing_v: 1.5
+
+penalty:
+  lambda: 100.0
+  type: quadratic
 ```
 
 The score is read only from `netlists/<design>/scoring.yaml`. The resolved
-weights/references are stored in `candidates.json`, `results.json`, and
+scoring configuration is stored in `candidates.json`, `results.json`, and
 `run/<design>/<run-id>/scoring.yaml`.
 
 ### Score formula
 
-The NRBO candidate score is minimized. There is no fixed initial or final score range; it
-depends on the selected units and weights. The implementation uses:
+The NRBO candidate score $S_{\text{total}}$ is minimized ($\min S_{\text{total}}$). There is no
+fixed initial or final score range; it depends on the selected units, weights, and penalties. The
+implementation uses:
 
 $$
-S =
-w_d\frac{t_d}{T_{ref}}
--w_s(f_sT_{ref})
-+w_p\frac{P}{P_{ref}}
-+w_e\frac{E}{E_{ref}}
-+w_o\frac{|V_{offset}|}{V_{offset,ref}}
-+w_n\frac{V_{noise}}{V_{noise,ref}}
-+w_k\frac{V_{kickback}}{V_{kickback,ref}}
-+100\left[\max\left(0,\frac{P}{P_{max}}-1\right)\right]^2
+\begin{aligned}
+S_{\text{total}} = {}&
+w_d \frac{t_d}{t_{d,\text{ref}}}
++ w_p \frac{P}{P_{\text{ref}}}
++ w_e \frac{E}{E_{\text{ref}}} \\
+&+ w_o \frac{|V_{\text{offset}}|}{V_{\text{offset,ref}}}
++ w_n \frac{V_{\text{noise}}}{V_{\text{noise,ref}}}
++ w_k \frac{V_{\text{kickback}}}{V_{\text{kickback,ref}}} \\
+&+ \lambda \left( g_P^2 + g_d^2 + g_O^2 + g_N^2 + g_K^2 + g_S^2 \right)
+\end{aligned}
 $$
 
-where $t_d$ is delay, $f_s=1/t_d$ is speed, $P$ is power, $E$ is energy per comparison,
-$V_{offset}$ is input-referred offset magnitude, $V_{noise}$ is input-referred noise,
-and $V_{kickback}$ is kickback noise. $T_{ref}$ is `analyses.transient.period_s`.
-All references and weights come from `scoring.yaml`. Missing weighted metrics receive a
-$1000$ score sentinel.
+where $t_d$ is delay, $P$ is power,
+$E$ is energy per comparison, $V_{\text{offset}}$ is input-referred offset, $V_{\text{noise}}$
+is input-referred noise, $V_{\text{kickback}}$ is kickback noise, and $V_{\text{swing}}$ is
+output swing. All references (including $t_{d,\text{ref}}$ from `references.delay_s`), weights,
+constraints, and $\lambda$ come from `scoring.yaml`. The normalized constraint violations are:
+
+$$
+g_P = \max\left(0, \frac{P}{P_{\max}} - 1\right), \quad
+g_d = \max\left(0, \frac{t_d}{t_{d,\max}} - 1\right), \quad
+g_O = \max\left(0, \frac{|V_{\text{offset}}|}{V_{\text{offset,max}}} - 1\right)
+$$
+
+$$
+g_N = \max\left(0, \frac{V_{\text{noise}}}{V_{\text{noise,max}}} - 1\right), \quad
+g_K = \max\left(0, \frac{V_{\text{kickback}}}{V_{\text{kickback,max}}} - 1\right), \quad
+g_S = \max\left(0, \frac{V_{\text{swing,min}} - V_{\text{swing}}}{V_{\text{swing,min}}}\right)
+$$
 
 Single-objective CLI selection has been removed. Every candidate is scored from the
-weighted terms in `scoring.yaml`; set the weights to select and balance the desired metrics.
-Failed candidates receive $1000$, and
-candidates missing an objective value receive $1000$ plus the power penalty, if applicable.
-The penalty term can raise their score substantially, while infeasible candidates are kept in
-results but sorted after feasible candidates.
+weighted terms and constraints in `scoring.yaml`; set the weights and limits to balance the
+desired metrics. Failed candidates or candidates missing a weighted or constrained metric receive
+`scoring.infeasible_score` (default $1000.0$) and are marked infeasible. Candidates violating any
+configured constraint are marked infeasible, incur the quadratic (or linear) penalty scaled by
+$\lambda$, and are sorted after feasible candidates in `candidates.json`.
 
 The RL reward is separate from the candidate score:
 
@@ -130,7 +160,7 @@ R=2\tanh\left(\frac{S_{previous}-S_{best}}{|S_{initial}|+10^{-6}}\right)
 +0.05F-0.01
 $$
 
-where $F$ is the fraction of the population that satisfies the power constraint and
+where $F$ is the fraction of the population that satisfies all configured constraints and
 $S_{previous}-S_{best}$ is improvement in the candidate score. With the current reward
 constants, $R$ is approximately in $[-0.01,2.04]$, while candidate scores have no fixed
 bounded range.
@@ -153,6 +183,12 @@ Each RL environment transition evaluates a population with SPICE. PPO/SAC rollou
 can therefore require many simulator calls: increasing `--population-size`,
 `--rl-timesteps`, or `--episode-length` increases runtime and simulation count. Start with
 small values to validate a design setup.
+
+Use `--workers N` (default `1`) to evaluate uncached candidates within each NRBO generation in
+parallel while preserving deterministic sample numbering, ordering, and scoring. Setting
+`--workers` up to `--population-size` (e.g., `--workers 4` for `--population-size 4`, subject to
+available CPU cores) parallelizes all simulations in each reset and step generation; values above
+`--population-size` provide no additional speedup.
 
 Use `-v` to print start, candidate evaluation, checkpoint, ranking, and completion progress.
 Use `-vv` to add resolved scoring configuration and score-config path details.

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 import gymnasium as gym
 import numpy as np
@@ -28,6 +28,7 @@ class DirectEvaluationEnv(gym.Env):
             [np.ndarray, np.ndarray, np.ndarray, np.random.Generator],
             np.ndarray,
         ],
+        evaluate_candidates: Callable[[Sequence[np.ndarray], int], Sequence[Mapping]] | None = None,
         initial_iteration: int = 0,
     ):
         super().__init__()
@@ -46,6 +47,7 @@ class DirectEvaluationEnv(gym.Env):
         self.population_size = population_size
         self.episode_length = episode_length
         self.evaluate_candidate = evaluate_candidate
+        self.evaluate_candidates = evaluate_candidates
         self.score_candidate = score_candidate
         self.is_feasible = is_feasible
         self.next_population = next_population
@@ -61,21 +63,41 @@ class DirectEvaluationEnv(gym.Env):
         self.initial_scale = 1.0
 
     def _evaluate_population(self) -> None:
-        scores = []
-        feasible = []
+        pending_keys: list[tuple[float, ...]] = []
+        pending_vectors: list[np.ndarray] = []
+        seen_pending: set[tuple[float, ...]] = set()
         for candidate in self.population:
             key = tuple(np.round(candidate, 10))
-            cached = self.evaluation_cache.get(key)
-            if cached is None:
-                record = self.evaluate_candidate(candidate.copy(), self.iteration)
+            if key not in self.evaluation_cache and key not in seen_pending:
+                seen_pending.add(key)
+                pending_keys.append(key)
+                pending_vectors.append(candidate.copy())
+
+        if pending_vectors:
+            if self.evaluate_candidates is not None:
+                records = self.evaluate_candidates(pending_vectors, self.iteration)
+            else:
+                records = [
+                    self.evaluate_candidate(vector, self.iteration)
+                    for vector in pending_vectors
+                ]
+            for key, record in zip(pending_keys, records):
                 candidate_score = float(self.score_candidate(record))
                 candidate_feasible = bool(self.is_feasible(record))
                 if not np.isfinite(candidate_score):
                     candidate_score = 1e6
                     candidate_feasible = False
-                cached = (dict(record), candidate_score, candidate_feasible)
-                self.evaluation_cache[key] = cached
-            record, candidate_score, candidate_feasible = cached
+                self.evaluation_cache[key] = (
+                    dict(record),
+                    candidate_score,
+                    candidate_feasible,
+                )
+
+        scores = []
+        feasible = []
+        for candidate in self.population:
+            key = tuple(np.round(candidate, 10))
+            record, candidate_score, candidate_feasible = self.evaluation_cache[key]
             scores.append(candidate_score)
             feasible.append(candidate_feasible)
             previous = self.archive.get(key)

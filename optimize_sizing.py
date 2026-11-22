@@ -29,6 +29,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--samples", type=int, default=5, help="number of top measured candidates")
     parser.add_argument("--population-size", type=int, default=4)
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="parallel simulation workers per population evaluation (default: 1)",
+    )
+    parser.add_argument(
         "--rl-timesteps",
         type=int,
         default=64,
@@ -70,6 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         samples=args.samples,
         seed=args.seed,
         population_size=args.population_size,
+        workers=args.workers,
         timesteps=args.rl_timesteps,
         episode_length=args.episode_length,
         mock_failure_rate=args.mock_failure_rate,
