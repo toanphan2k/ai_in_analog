@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -504,6 +505,24 @@ def _run_ngspice(
         )
 
 
+def _expected_evaluations(
+    algorithm: str,
+    population_size: int,
+    timesteps: int,
+    episode_length: int,
+) -> int:
+    """Compute exact max unique evaluations for one training + final rollout session."""
+    if algorithm.upper() == "PPO":
+        rollout_steps = min(8, max(2, timesteps))
+        effective_steps = math.ceil(timesteps / rollout_steps) * rollout_steps
+    else:
+        effective_steps = timesteps
+    training_resets = 1 + (effective_steps // episode_length)
+    total_resets = training_resets + 1  # +1 for final deterministic rollout
+    total_steps = effective_steps + episode_length
+    return total_resets * population_size + total_steps * (population_size - 1)
+
+
 def _sample_dir(run_dir: Path, index: int) -> Path:
     return run_dir / "data" / f"sample_{index:06d}"
 
@@ -701,6 +720,7 @@ def run_rl_sizing(
     timeout_s: float,
     workers: int = 1,
     resume: str | None = None,
+    keep: int | None = None,
     verbose: int = 0,
 ) -> Path:
     """Run PPO/SAC-controlled NRBO with weighted measured scores."""
@@ -713,6 +733,8 @@ def run_rl_sizing(
         raise ValueError("samples and population size must be positive")
     if workers < 1:
         raise ValueError("workers must be at least 1")
+    if keep is not None and keep < 0:
+        raise ValueError("keep must be nonnegative")
 
     netlist_dir = Path(netlist)
     if not netlist_dir.is_absolute():
@@ -802,6 +824,7 @@ def run_rl_sizing(
         "rl_timesteps": timesteps,
         "episode_length": episode_length,
         "samples_requested": samples,
+        "keep": keep,
         "resumed_from": str(run_dir) if resume is not None else None,
         "checkpoint_dir": str(checkpoint_dir) if resume is not None or checkpoint_dir else None,
         "score_config": str(score_path),
@@ -812,10 +835,11 @@ def run_rl_sizing(
     _atomic_json(run_dir / "results.json", metadata)
 
     if verbose >= 1:
+        keep_label = "all" if keep is None else str(keep)
         print(
             f"Starting {run_id}: algorithm={algorithm}, runner={runner_name}, "
             f"population={population_size}, workers={workers}, "
-            f"timesteps={timesteps}, episodes={episode_length}",
+            f"timesteps={timesteps}, episodes={episode_length}, keep={keep_label}",
             file=sys.stderr,
         )
     runner = (
@@ -853,6 +877,47 @@ def run_rl_sizing(
         if suffix.isdigit():
             existing_indexes.append(int(suffix))
     next_index = max(existing_indexes, default=0) + 1
+    total_evaluations = (next_index - 1) + _expected_evaluations(
+        algorithm, population_size, timesteps, episode_length
+    )
+
+    kept_records: dict[int, dict[str, Any]] = {}
+
+    def _sample_rank_key(index: int, record: Mapping[str, Any]) -> tuple[bool, float, int]:
+        metrics = record.get("metrics") or {}
+        feasible = bool(metrics.get("rl_feasible", record.get("rl_feasible", False)))
+        raw_score = metrics.get("rl_objective_score", record.get("rl_objective_score"))
+        try:
+            score = float(raw_score) if raw_score is not None else math.inf
+        except (TypeError, ValueError):
+            score = math.inf
+        if not math.isfinite(score):
+            score = math.inf
+        return (not feasible, score, index)
+
+    def _prune_sample_dirs() -> None:
+        if keep is None or len(kept_records) <= keep:
+            return
+        ranked_kept = sorted(
+            kept_records.items(),
+            key=lambda item: _sample_rank_key(item[0], item[1]),
+        )
+        for evict_index, evict_record in ranked_kept[keep:]:
+            sample_dir = _sample_dir(run_dir, evict_index)
+            if sample_dir.exists():
+                shutil.rmtree(sample_dir, ignore_errors=True)
+            evict_record["files"] = {}
+            kept_records.pop(evict_index, None)
+
+    if keep is not None:
+        for existing in existing_samples:
+            name = str(existing.get("name", ""))
+            suffix = name.rsplit("_", 1)[-1]
+            if suffix.isdigit():
+                idx = int(suffix)
+                if _sample_dir(run_dir, idx).exists():
+                    kept_records[idx] = existing
+        _prune_sample_dirs()
 
     def _run_candidate_sample(
         index: int,
@@ -897,7 +962,7 @@ def run_rl_sizing(
         record.update(record["metrics"])
         if verbose >= 1:
             print(
-                f"Evaluated {index}/{run_id}: "
+                f"Evaluated {index}/{total_evaluations}: "
                 f"score={record['metrics']['rl_objective_score']:.6g}, "
                 f"feasible={record['metrics']['rl_feasible']}, status={record['status']}",
                 file=sys.stderr,
@@ -911,9 +976,15 @@ def run_rl_sizing(
             else "partial"
         )
         evaluated_by_vector[key] = record
+        if keep is not None:
+            kept_records[index] = record
+            _prune_sample_dirs()
         if index % CHECKPOINT_INTERVAL == 0:
             if verbose >= 1:
-                print(f"Checkpoint: {index} candidates evaluated", file=sys.stderr)
+                print(
+                    f"Checkpoint: {index}/{total_evaluations} candidates evaluated",
+                    file=sys.stderr,
+                )
             _write_results_csv(
                 run_dir / "results.csv",
                 metadata["samples"],

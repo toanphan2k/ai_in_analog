@@ -53,6 +53,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--timeout-s", type=float, default=120.0)
     parser.add_argument("--mock-failure-rate", type=float, default=0.03)
     parser.add_argument(
+        "--keep",
+        type=int,
+        default=None,
+        help=(
+            "keep only the N best per-sample data/ folders on disk during the run "
+            "(default: keep all; e.g., --keep 50 keeps the best 50, metrics remain in results.csv/json)"
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -83,6 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_id=args.run_id,
         resume=args.resume,
         timeout_s=args.timeout_s,
+        keep=args.keep,
         verbose=args.verbose,
     )
     print(f"Results: {run_dir}")

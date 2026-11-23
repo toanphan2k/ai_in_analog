@@ -47,7 +47,7 @@ command -v magic
 
 Open PDKs downloads the SKY130 source repositories during configuration/build. The
 following creates only the `sky130A` variant and installs to the default
-`/usr/local/share/pdk` path expected by this project's `netlists/strongarm/netlist.spice`.
+`/usr/local/share/pdk` path expected by this project's `netlists/strongarm_2ghz/netlist.spice`.
 
 ```bash
 cd ~/src
@@ -74,7 +74,7 @@ test -r "$PDK_ROOT/sky130A/libs.tech/ngspice/sky130.lib.spice" && \
 ```
 
 If you install Open PDKs with a non-default prefix, update the `.lib` path in
-`netlists/strongarm/netlist.spice` as well; SPICE does not expand `PDK_ROOT` inside that
+`netlists/strongarm_2ghz/netlist.spice` as well; SPICE does not expand `PDK_ROOT` inside that
 absolute path.
 
 ## 4. Set Up the Project Python Environment
@@ -110,7 +110,7 @@ Then run a small real simulation from the repository root:
 ```bash
 python3 optimize_sizing.py \
   --runner ngspice \
-  --netlist netlists/strongarm/ \
+  --netlist netlists/strongarm_2ghz/ \
   --algorithm PPO \
   --samples 2 \
   --population-size 4 \

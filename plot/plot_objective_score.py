@@ -44,10 +44,13 @@ def plot_objective_score(
         finite = np.isfinite(run.objective_score)
         if include_failed:
             mask = finite
+            point_kind = "all evaluations"
         else:
             mask = finite & run.feasible & (run.objective_score < SENTINEL_SCORE)
+            point_kind = "feasible evaluations"
             if not np.any(mask):
                 mask = finite & (run.objective_score < SENTINEL_SCORE)
+                point_kind = "evaluations (none feasible)"
 
         if not np.any(mask):
             continue
@@ -64,7 +67,7 @@ def plot_objective_score(
             alpha=0.35,
             s=26,
             edgecolors="none",
-            label=f"{run.label} (evaluations)",
+            label=f"{run.label} ({point_kind})",
         )
         ax.plot(
             x,
@@ -105,7 +108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     plot_objective_score(
-        args.csv,
+        args.data_dir,
         output=args.output,
         title=args.title,
         dpi=args.dpi,

@@ -36,7 +36,7 @@ installed by pip.
 ```bash
 python3 optimize_sizing.py \
   --runner ngspice \
-  --netlist netlists/strongarm/ \
+  --netlist netlists/strongarm_2ghz/ \
   --algorithm PPO \
   --samples 5 \
   --population-size 4 \
@@ -51,7 +51,7 @@ python3 optimize_sizing.py \
 ```bash
 python3 optimize_sizing.py \
   --runner ngspice \
-  --netlist netlists/strongarm/ \
+  --netlist netlists/strongarm_2ghz/ \
   --algorithm SAC \
   --samples 5 \
   --population-size 4 \
@@ -190,6 +190,12 @@ parallel while preserving deterministic sample numbering, ordering, and scoring.
 available CPU cores) parallelizes all simulations in each reset and step generation; values above
 `--population-size` provide no additional speedup.
 
+Use `--keep N` (e.g., `--keep 50`) to prune per-evaluation folders under `data/sample_XXXXXX/`
+during long runs, keeping raw SPICE decks and waveforms on disk **only for the `N` best
+candidates** (default keeps all; `--keep 0` removes all sample folders). All measured metrics,
+sizes, and scores remain in `results.csv` and `results.json`, and all plotting scripts including
+Plot 6 transient waveforms continue to work as long as `N >= --top-k`.
+
 Use `-v` to print start, candidate evaluation, checkpoint, ranking, and completion progress.
 Use `-vv` to add resolved scoring configuration and score-config path details.
 Default run IDs use `run_YYYY_MM_DD_HH_MM`; for example:
@@ -207,27 +213,29 @@ direct simulator measurements, not surrogate predictions.
 ## Plotting Results
 
 Standalone plotting scripts live under `plot/` (one script per plot, plus `plot/plot.py` to
-generate all 5 plots together):
+generate all standard plots together):
 
 - `plot/plot_objective_score.py` — Plot 1: Objective Score vs. Evaluation Number
 - `plot/plot_feasibility_rate.py` — Plot 2: Feasibility Rate vs. Evaluation Number
 - `plot/plot_power_vs_delay.py` — Plot 3: Power vs. Delay (with feasible Pareto front)
 - `plot/plot_offset_vs_noise.py` — Plot 4: Offset vs. Noise (with feasible Pareto front)
 - `plot/plot_kickback_vs_noise.py` — Plot 5: Kickback vs. Input-Referred Noise (with feasible Pareto front)
+- `plot/plot_transient_waveforms.py` — Plot 6: Transient Waveforms for Top-K Best Candidates (default `--top-k 5`)
 
-Generate a single plot or all 5 plots from one or more `results.csv` files:
+Generate a single plot or all plots from one or more run directories:
 
 ```bash
-python3 plot/plot_objective_score.py --csv run/strongarm/<run-id>/results.csv
-python3 plot/plot.py --csv run/strongarm/<run-id>/results.csv
+python3 plot/plot_objective_score.py --data-dir run/strongarm/<run-id>
+python3 plot/plot_transient_waveforms.py --data-dir run/strongarm/<run-id> --top-k 5
+python3 plot/plot.py --data-dir run/strongarm/<run-id>
 ```
 
 Compare multiple runs (e.g., PPO vs. SAC or multiple seeds) on the same axes by passing multiple
-CSV paths:
+run directories:
 
 ```bash
 python3 plot/plot.py \
-  --csv run/strongarm/<ppo-run>/results.csv run/strongarm/<sac-run>/results.csv
+  --data-dir run/strongarm/<ppo-run> run/strongarm/<sac-run>
 ```
 
 By default, PNGs are saved outside `run/` into the workspace directory:
@@ -258,7 +266,7 @@ Resume a run by run ID or full path:
 ```bash
 python3 optimize_sizing.py \
   --runner ngspice \
-  --netlist netlists/strongarm/ \
+  --netlist netlists/strongarm_2ghz/ \
   --algorithm PPO \
   --resume run_resume_smoke \
   --rl-timesteps 64 \
@@ -275,7 +283,7 @@ For a pipeline smoke test without ngspice, use the synthetic mock runner:
 ```bash
 python3 optimize_sizing.py \
   --runner mock \
-  --netlist netlists/strongarm/ \
+  --netlist netlists/strongarm_2ghz/ \
   --algorithm PPO \
   --samples 3 \
   --population-size 4 \

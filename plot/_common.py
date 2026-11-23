@@ -72,16 +72,31 @@ def _build_label(path: Path, algorithm: str, seed: str, include_run_name: bool) 
     return run_name
 
 
+def resolve_csv_paths(inputs: Sequence[str | Path]) -> list[Path]:
+    """Resolve run directories (containing results.csv) or direct CSV paths."""
+    resolved: list[Path] = []
+    for raw in inputs:
+        path = Path(raw).resolve()
+        if path.is_dir():
+            csv_path = path / "results.csv"
+            if not csv_path.is_file():
+                raise FileNotFoundError(f"results.csv not found in run directory: {path}")
+            resolved.append(csv_path)
+        elif path.is_file():
+            resolved.append(path)
+        else:
+            raise FileNotFoundError(f"Run directory or CSV file not found: {path}")
+    return resolved
+
+
 def load_results_csv(csv_paths: Sequence[str | Path]) -> list[RunData]:
-    """Load one or more results.csv files into structured RunData records."""
-    resolved_paths = [Path(p).resolve() for p in csv_paths]
+    """Load one or more run directories or results.csv files into RunData records."""
+    resolved_paths = resolve_csv_paths(csv_paths)
     runs: list[RunData] = []
     raw_meta: list[tuple[Path, str, str]] = []
     parsed_rows_list: list[list[dict[str, str]]] = []
 
     for path in resolved_paths:
-        if not path.is_file():
-            raise FileNotFoundError(f"CSV file not found: {path}")
         with path.open("r", newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))
         if not rows:
@@ -244,13 +259,15 @@ def default_output_path(runs: Sequence[RunData], default_stem: str) -> Path:
 
 
 def build_arg_parser(description: str) -> argparse.ArgumentParser:
-    """Create a shared CLI argument parser supporting --csv mycsv.csv."""
+    """Create a shared CLI argument parser supporting --data-dir <run_dir>."""
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
+        "--data-dir",
         "--csv",
+        dest="data_dir",
         nargs="+",
         required=True,
-        help="path(s) to results.csv file(s)",
+        help="path(s) to run directory(ies) (e.g. run/strongarm/<run_id>) or results.csv file(s)",
     )
     parser.add_argument(
         "-o",

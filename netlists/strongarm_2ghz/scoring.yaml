@@ -1,0 +1,31 @@
+scoring:
+  objective: minimize
+  infeasible_score: 1000.0
+
+weights:
+  delay: 1.5
+  power: 0.5
+  energy: 0.5
+  offset: 1.0
+  noise: 0.5
+  kickback: 1.0
+
+references:
+  delay_s: 2.0e-10
+  power_w: 7.0e-4
+  energy_j: 1.0e-13
+  offset_v: 5.0e-3
+  noise_v: 5.0e-4
+  kickback_v: 2.0e-2
+
+constraints:
+  max_delay_s: 3.0e-10
+  max_power_w: 7.0e-4
+  max_offset_v: 1.0e-2
+  max_noise_v: 1.0e-3
+  max_kickback_v: 2.0e-2
+  min_output_swing_v: 1.5
+
+penalty:
+  lambda: 100.0
+  type: quadratic

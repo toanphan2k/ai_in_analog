@@ -133,7 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--log-y", action="store_true", help="use log scale for Kickback axis")
     args = parser.parse_args(argv)
     plot_kickback_vs_noise(
-        args.csv,
+        args.data_dir,
         output=args.output,
         title=args.title,
         dpi=args.dpi,
