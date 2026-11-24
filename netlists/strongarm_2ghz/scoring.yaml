@@ -20,6 +20,7 @@ references:
 
 constraints:
   max_delay_s: 3.0e-10
+  max_reset_time_s: 1.5e-10
   max_power_w: 7.0e-4
   max_offset_v: 1.0e-2
   max_noise_v: 1.0e-3

@@ -21,12 +21,13 @@ import yaml
 from runner.mock_runner import MockRunner
 from runner.ngspice_runner import NgspiceRun
 from scripts.deck_generation import render_sized_deck
-from scripts.extract_delay import extract_delay
+from scripts.extract_delay import TransientFailureError, extract_delay
 from scripts.extract_gain import extract_gain
 from scripts.extract_kickback import extract_kickback
 from scripts.extract_noise import extract_noise
 from scripts.extract_offset import extract_offset_metric
 from scripts.netlist_tools import load_sizing_config
+from scripts.pdk_models import rewrite_deck_with_reduced_models, write_spiceinit
 from src.rl_nrbo import optimize_with_rl_nrbo
 from src.selector import variable_names
 
@@ -64,13 +65,17 @@ RESULT_METRIC_COLUMNS = (
     "input_referred_noise_v",
     "kickback_noise_v",
     "output_swing_v",
+    "voh_v",
+    "vol_v",
+    "overshoot_v",
     "dc_gain_v_per_v",
     "peak_gain_v_per_v",
     "peak_gain_frequency_hz",
     "bandwidth_3db_hz",
-    "samples",
+    "ac_freq_points",
     "rl_objective_score",
     "rl_feasible",
+    "constraint_violations",
     "error",
 )
 
@@ -121,6 +126,35 @@ def _physical_sizes(config: Mapping, vector: Sequence[float]) -> dict[str, float
     return sizes
 
 
+def _normalize_sizes(config: Mapping, sizes: Mapping[str, Any]) -> list[float] | None:
+    """Invert _physical_sizes from physical micrometre columns when resuming from results.csv."""
+    names = variable_names(config)
+    bounds = config.get("optimization", {}).get("bounds", {})
+    vector: list[float] = []
+    for name in names:
+        raw = sizes.get(name)
+        bound = bounds.get(name)
+        if raw is None or bound is None:
+            return None
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(val):
+            return None
+        low, high = float(bound["min"]), float(bound["max"])
+        if high <= low:
+            return None
+        if bound.get("scale", "linear") == "log":
+            if low <= 0.0 or val <= 0.0:
+                return None
+            norm = math.log(val / low) / math.log(high / low)
+        else:
+            norm = (val - low) / (high - low)
+        vector.append(min(1.0, max(0.0, float(norm))))
+    return vector
+
+
 def _size_column_names(
     samples: Sequence[Mapping[str, Any]],
     design_names: Sequence[str] = (),
@@ -150,7 +184,8 @@ def _write_results_csv(
 ) -> None:
     size_columns = _size_column_names(samples, design_names)
     fieldnames = RESULT_PREFIX_COLUMNS + size_columns + RESULT_METRIC_COLUMNS
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for sample in samples:
@@ -173,6 +208,10 @@ def _write_results_csv(
                     else (seed if seed is not None else "")
                 ),
                 "status": sample["status"],
+                "constraint_violations": sample.get(
+                    "constraint_violations",
+                    metrics.get("constraint_violations", ""),
+                ),
                 "error": sample.get("error", ""),
             }
             if isinstance(size, Mapping):
@@ -180,9 +219,155 @@ def _write_results_csv(
                     if column in size:
                         row[column] = size[column]
             for column in RESULT_METRIC_COLUMNS:
+                if column in {"error", "constraint_violations"}:
+                    continue
                 if column in metrics:
                     row[column] = metrics[column]
             writer.writerow(row)
+    tmp_path.replace(path)
+
+
+def _write_candidates_csv(
+    path: Path,
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    design_names: Sequence[str] = (),
+    algorithm: str,
+    seed: int,
+    records_by_name: Mapping[str, Mapping[str, Any]],
+) -> None:
+    size_columns = _size_column_names(candidates, design_names)
+    fieldnames = ("rank",) + RESULT_PREFIX_COLUMNS + size_columns + RESULT_METRIC_COLUMNS
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for rank, cand in enumerate(candidates, start=1):
+            sample_name = str(cand.get("sample", ""))
+            source_rec = records_by_name.get(sample_name, {})
+            metrics = dict(source_rec.get("metrics", {}))
+            metrics.update(cand.get("metrics") or {})
+            size = cand.get("size") or source_rec.get("size") or {}
+            row: dict[str, Any] = {
+                "rank": rank,
+                "sample": sample_name,
+                "algorithm": source_rec.get("algorithm", algorithm),
+                "iteration": source_rec.get("iteration", ""),
+                "seed": source_rec.get("seed", seed),
+                "status": cand.get("status", source_rec.get("status", "")),
+                "rl_objective_score": cand.get("score", metrics.get("rl_objective_score", "")),
+                "rl_feasible": cand.get("feasible", metrics.get("rl_feasible", "")),
+                "constraint_violations": source_rec.get(
+                    "constraint_violations",
+                    metrics.get("constraint_violations", ""),
+                ),
+                "error": cand.get("error", source_rec.get("error", "")),
+            }
+            if isinstance(size, Mapping):
+                for column in size_columns:
+                    if column in size:
+                        row[column] = size[column]
+            for column in RESULT_METRIC_COLUMNS:
+                if column in {"rl_objective_score", "rl_feasible", "constraint_violations", "error"}:
+                    continue
+                if column in metrics:
+                    row[column] = metrics[column]
+            writer.writerow(row)
+    tmp_path.replace(path)
+
+
+def _load_existing_results_csv(
+    csv_path: Path,
+    sizing_config: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], str | None, int | None]:
+    """Load existing sample records from results.csv for --resume."""
+    design_names = variable_names(sizing_config)
+    with csv_path.open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+
+    samples: list[dict[str, Any]] = []
+    detected_algo: str | None = None
+    detected_seed: int | None = None
+
+    for row in rows:
+        algo = (row.get("algorithm") or "").strip()
+        if algo and detected_algo is None:
+            detected_algo = algo.upper()
+        seed_text = (row.get("seed") or "").strip()
+        if seed_text and detected_seed is None:
+            try:
+                detected_seed = int(float(seed_text))
+            except ValueError:
+                pass
+
+        size: dict[str, float] = {}
+        for col in design_names:
+            raw = (row.get(col) or "").strip()
+            if raw:
+                try:
+                    size[col] = float(raw)
+                except ValueError:
+                    pass
+
+        metrics: dict[str, Any] = {}
+        for col in RESULT_METRIC_COLUMNS:
+            if col in {"error", "constraint_violations"}:
+                continue
+            raw = (row.get(col) or "").strip()
+            if not raw:
+                continue
+            if col == "rl_feasible":
+                metrics[col] = raw.lower() in {"true", "1", "yes"}
+            elif col in {"cycles_measured", "ac_freq_points"}:
+                try:
+                    metrics[col] = int(float(raw))
+                except ValueError:
+                    pass
+            else:
+                try:
+                    val = float(raw)
+                    if math.isfinite(val):
+                        metrics[col] = val
+                except ValueError:
+                    pass
+
+        constraint_violations = (row.get("constraint_violations") or "").strip()
+        if constraint_violations:
+            metrics["constraint_violations"] = constraint_violations
+
+        iter_raw = (row.get("iteration") or "").strip()
+        iteration_val: int | None = None
+        if iter_raw:
+            try:
+                iteration_val = int(float(iter_raw))
+            except ValueError:
+                pass
+
+        seed_val: int | None = None
+        if seed_text:
+            try:
+                seed_val = int(float(seed_text))
+            except ValueError:
+                pass
+
+        x_norm = _normalize_sizes(sizing_config, size)
+        rec: dict[str, Any] = {
+            "name": (row.get("sample") or "").strip(),
+            "algorithm": algo.upper() if algo else detected_algo,
+            "iteration": iteration_val,
+            "seed": seed_val if seed_val is not None else detected_seed,
+            "status": (row.get("status") or "failed").strip(),
+            "x_norm": x_norm,
+            "size": size,
+            "metrics": metrics,
+            "constraint_violations": constraint_violations,
+            "error": (row.get("error") or "").strip(),
+            "files": {},
+        }
+        rec.update(metrics)
+        samples.append(rec)
+
+    return samples, detected_algo, detected_seed
 
 
 def _load_score_config(netlist_dir: Path) -> tuple[dict, Path]:
@@ -224,6 +409,16 @@ def _parse_optional_positive(mapping: Mapping[str, Any], key: str) -> float | No
     value = float(raw)
     if value <= 0.0 or not math.isfinite(value):
         raise ValueError(f"{key} must be finite and positive")
+    return value
+
+
+def _parse_optional_nonnegative(mapping: Mapping[str, Any], key: str) -> float | None:
+    raw = mapping.get(key)
+    if raw is None:
+        return None
+    value = float(raw)
+    if value < 0.0 or not math.isfinite(value):
+        raise ValueError(f"{key} must be finite and nonnegative")
     return value
 
 
@@ -296,11 +491,15 @@ def resolve_score_config(
         raise ValueError("metric references must be finite and positive")
 
     max_delay_s = _parse_optional_positive(constraints, "max_delay_s")
+    max_reset_time_s = _parse_optional_positive(constraints, "max_reset_time_s")
     max_power_w = _parse_optional_positive(constraints, "max_power_w")
     max_offset_v = _parse_optional_positive(constraints, "max_offset_v")
     max_noise_v = _parse_optional_positive(constraints, "max_noise_v")
     max_kickback_v = _parse_optional_positive(constraints, "max_kickback_v")
     min_output_swing_v = _parse_optional_positive(constraints, "min_output_swing_v")
+    min_voh_v = _parse_optional_positive(constraints, "min_voh_v")
+    max_vol_v = _parse_optional_nonnegative(constraints, "max_vol_v")
+    max_overshoot_v = _parse_optional_nonnegative(constraints, "max_overshoot_v")
 
     penalty_lambda = float(penalty.get("lambda", 100.0))
     if penalty_lambda < 0.0 or not math.isfinite(penalty_lambda):
@@ -327,11 +526,15 @@ def resolve_score_config(
         "noise_reference_v": noise_reference_v,
         "kickback_reference_v": kickback_reference_v,
         "max_delay_s": max_delay_s,
+        "max_reset_time_s": max_reset_time_s,
         "max_power_w": max_power_w,
         "max_offset_v": max_offset_v,
         "max_noise_v": max_noise_v,
         "max_kickback_v": max_kickback_v,
         "min_output_swing_v": min_output_swing_v,
+        "min_voh_v": min_voh_v,
+        "max_vol_v": max_vol_v,
+        "max_overshoot_v": max_overshoot_v,
         "penalty_lambda": penalty_lambda,
         "penalty_type": penalty_type,
     }
@@ -339,41 +542,69 @@ def resolve_score_config(
 
 def _extract_scored_metrics(record: Mapping[str, Any]) -> dict[str, float | None]:
     metrics = record.get("metrics", {})
-    delay = _finite_metric(metrics.get("delay_s"))
-    power = _finite_metric(metrics.get("power_w"))
-    energy = _finite_metric(metrics.get("energy_per_comparison_j", metrics.get("energy_j")))
-    offset = _finite_metric(metrics.get("input_referred_offset_v", metrics.get("offset_v")))
-    noise = _finite_metric(metrics.get("input_referred_noise_v"))
-    kickback = _finite_metric(metrics.get("kickback_noise_v"))
-    output_swing = _finite_metric(metrics.get("output_swing_v"))
     return {
-        "delay_s": delay,
-        "power_w": power,
-        "energy_j": energy,
-        "offset_v": offset,
-        "noise_v": noise,
-        "kickback_v": kickback,
-        "output_swing_v": output_swing,
+        "delay_s": _finite_metric(metrics.get("delay_s")),
+        "reset_time_s": _finite_metric(metrics.get("reset_time_s")),
+        "power_w": _finite_metric(metrics.get("power_w")),
+        "energy_j": _finite_metric(metrics.get("energy_per_comparison_j", metrics.get("energy_j"))),
+        "offset_v": _finite_metric(metrics.get("input_referred_offset_v", metrics.get("offset_v"))),
+        "noise_v": _finite_metric(metrics.get("input_referred_noise_v")),
+        "kickback_v": _finite_metric(metrics.get("kickback_noise_v")),
+        "output_swing_v": _finite_metric(metrics.get("output_swing_v")),
+        "voh_v": _finite_metric(metrics.get("voh_v")),
+        "vol_v": _finite_metric(metrics.get("vol_v")),
+        "overshoot_v": _finite_metric(metrics.get("overshoot_v")),
     }
+
+
+def _graded_failure_score(record: Mapping[str, Any], infeasible_score: float) -> float:
+    """Compute a smooth graded penalty in [0.5*infeasible_score, infeasible_score] for failed sims."""
+    info = record.get("failure_info")
+    if not isinstance(info, Mapping):
+        return infeasible_score
+
+    dec_th = _finite_metric(info.get("decision_threshold_v")) or 0.9
+    dec_th = max(dec_th, 1e-9)
+    peak_diff = max(0.0, _finite_metric(info.get("peak_diff_v")) or 0.0)
+    decision_ratio = min(1.0, peak_diff / dec_th)
+
+    total_cycles = max(int(info.get("total_cycles") or 1), 1)
+    done_cycles = min(total_cycles, max(0, int(info.get("cycles_completed") or 0)))
+    cycle_ratio = done_cycles / total_cycles
+
+    rst_min = _finite_metric(info.get("reset_min_v"))
+    rst_th = _finite_metric(info.get("reset_threshold_v"))
+    if rst_min is not None and rst_th is not None and rst_th > 0.0:
+        reset_ratio = min(1.0, max(0.0, rst_min / rst_th))
+        progress = 0.55 * decision_ratio + 0.25 * reset_ratio + 0.20 * cycle_ratio
+    else:
+        progress = 0.75 * decision_ratio + 0.25 * cycle_ratio
+
+    progress = min(0.99, max(0.0, progress))
+    return float(0.5 * infeasible_score + 0.5 * infeasible_score * (1.0 - progress))
 
 
 def compute_objective_score(
     record: Mapping[str, Any],
     resolved: Mapping[str, Any],
 ) -> float:
-    """Compute S_total (lower is better) with normalized terms and constraint penalties."""
+    """Compute S_total (lower is better) with graded failure penalty and constraint penalties."""
     infeasible_score = float(resolved["infeasible_score"])
     if record.get("status") == "failed":
-        return infeasible_score
+        return _graded_failure_score(record, infeasible_score)
 
     m = _extract_scored_metrics(record)
     delay = m["delay_s"]
+    reset_time = m["reset_time_s"]
     power = m["power_w"]
     energy = m["energy_j"]
     offset = m["offset_v"]
     noise = m["noise_v"]
     kickback = m["kickback_v"]
     output_swing = m["output_swing_v"]
+    voh = m["voh_v"]
+    vol = m["vol_v"]
+    overshoot = m["overshoot_v"]
 
     if (
         (resolved["delay_weight"] > 0.0 and delay is None)
@@ -383,13 +614,17 @@ def compute_objective_score(
         or (resolved["noise_weight"] > 0.0 and noise is None)
         or (resolved["kickback_weight"] > 0.0 and kickback is None)
         or (resolved["max_delay_s"] is not None and delay is None)
+        or (resolved.get("max_reset_time_s") is not None and reset_time is None)
         or (resolved["max_power_w"] is not None and power is None)
         or (resolved["max_offset_v"] is not None and offset is None)
         or (resolved["max_noise_v"] is not None and noise is None)
         or (resolved["max_kickback_v"] is not None and kickback is None)
         or (resolved["min_output_swing_v"] is not None and output_swing is None)
+        or (resolved.get("min_voh_v") is not None and voh is None)
+        or (resolved.get("max_vol_v") is not None and vol is None)
+        or (resolved.get("max_overshoot_v") is not None and overshoot is None)
     ):
-        return infeasible_score
+        return _graded_failure_score(record, infeasible_score)
 
     value = 0.0
     if resolved["delay_weight"] > 0.0:
@@ -410,6 +645,8 @@ def compute_objective_score(
         violations.append(max(0.0, power / resolved["max_power_w"] - 1.0))
     if resolved["max_delay_s"] is not None:
         violations.append(max(0.0, delay / resolved["max_delay_s"] - 1.0))
+    if resolved.get("max_reset_time_s") is not None:
+        violations.append(max(0.0, reset_time / resolved["max_reset_time_s"] - 1.0))
     if resolved["max_offset_v"] is not None:
         violations.append(max(0.0, abs(offset) / resolved["max_offset_v"] - 1.0))
     if resolved["max_noise_v"] is not None:
@@ -420,6 +657,14 @@ def compute_objective_score(
         violations.append(
             max(0.0, (resolved["min_output_swing_v"] - output_swing) / resolved["min_output_swing_v"])
         )
+    if resolved.get("min_voh_v") is not None:
+        violations.append(max(0.0, (resolved["min_voh_v"] - voh) / resolved["min_voh_v"]))
+    if resolved.get("max_vol_v") is not None:
+        denom = max(resolved["max_vol_v"], 0.05)
+        violations.append(max(0.0, (vol - resolved["max_vol_v"]) / denom))
+    if resolved.get("max_overshoot_v") is not None:
+        denom = max(resolved["max_overshoot_v"], 0.05)
+        violations.append(max(0.0, (overshoot - resolved["max_overshoot_v"]) / denom))
 
     penalty_lambda = float(resolved["penalty_lambda"])
     if penalty_lambda > 0.0 and violations:
@@ -431,60 +676,123 @@ def compute_objective_score(
     return float(value) if math.isfinite(value) else infeasible_score
 
 
-def is_record_feasible(
+def describe_constraint_violations(
     record: Mapping[str, Any],
     resolved: Mapping[str, Any],
-) -> bool:
-    """Return True iff the candidate succeeded, has all required metrics, and meets all constraints."""
+) -> str:
+    """Return human-readable infeasibility reasons when rl_feasible is False."""
     if record.get("status") == "failed":
-        return False
+        return "simulation_failed"
 
     m = _extract_scored_metrics(record)
     delay = m["delay_s"]
+    reset_time = m["reset_time_s"]
     power = m["power_w"]
     energy = m["energy_j"]
     offset = m["offset_v"]
     noise = m["noise_v"]
     kickback = m["kickback_v"]
     output_swing = m["output_swing_v"]
+    voh = m["voh_v"]
+    vol = m["vol_v"]
+    overshoot = m["overshoot_v"]
 
-    if (
-        (resolved["delay_weight"] > 0.0 and delay is None)
-        or (resolved["power_weight"] > 0.0 and power is None)
-        or (resolved["energy_weight"] > 0.0 and energy is None)
-        or (resolved["offset_weight"] > 0.0 and offset is None)
-        or (resolved["noise_weight"] > 0.0 and noise is None)
-        or (resolved["kickback_weight"] > 0.0 and kickback is None)
+    reasons: list[str] = []
+    for w_key, val, name in (
+        ("delay_weight", delay, "delay_s"),
+        ("power_weight", power, "power_w"),
+        ("energy_weight", energy, "energy_j"),
+        ("offset_weight", offset, "input_referred_offset_v"),
+        ("noise_weight", noise, "input_referred_noise_v"),
+        ("kickback_weight", kickback, "kickback_noise_v"),
     ):
-        return False
+        if resolved[w_key] > 0.0 and val is None:
+            reasons.append(f"missing {name}")
 
-    if resolved["max_delay_s"] is not None and (delay is None or delay > resolved["max_delay_s"]):
-        return False
-    if resolved["max_power_w"] is not None and (power is None or power > resolved["max_power_w"]):
-        return False
-    if resolved["max_offset_v"] is not None and (
-        offset is None or abs(offset) > resolved["max_offset_v"]
-    ):
-        return False
-    if resolved["max_noise_v"] is not None and (noise is None or noise > resolved["max_noise_v"]):
-        return False
-    if resolved["max_kickback_v"] is not None and (
-        kickback is None or kickback > resolved["max_kickback_v"]
-    ):
-        return False
-    if resolved["min_output_swing_v"] is not None and (
-        output_swing is None or output_swing < resolved["min_output_swing_v"]
-    ):
-        return False
-    return True
+    if resolved["max_delay_s"] is not None:
+        if delay is None:
+            reasons.append("missing delay_s")
+        elif delay > resolved["max_delay_s"]:
+            reasons.append(
+                f"delay_s={delay * 1e12:.2f}ps > max {resolved['max_delay_s'] * 1e12:.2f}ps"
+            )
+    if resolved.get("max_reset_time_s") is not None:
+        if reset_time is None:
+            reasons.append("missing reset_time_s")
+        elif reset_time > resolved["max_reset_time_s"]:
+            reasons.append(
+                f"reset_time_s={reset_time * 1e12:.2f}ps > max {resolved['max_reset_time_s'] * 1e12:.2f}ps"
+            )
+    if resolved["max_power_w"] is not None:
+        if power is None:
+            reasons.append("missing power_w")
+        elif power > resolved["max_power_w"]:
+            reasons.append(
+                f"power_w={power * 1e3:.3f}mW > max {resolved['max_power_w'] * 1e3:.3f}mW"
+            )
+    if resolved["max_offset_v"] is not None:
+        if offset is None:
+            reasons.append("missing input_referred_offset_v")
+        elif abs(offset) > resolved["max_offset_v"]:
+            reasons.append(
+                f"|offset_v|={abs(offset) * 1e3:.2f}mV > max {resolved['max_offset_v'] * 1e3:.2f}mV"
+            )
+    if resolved["max_noise_v"] is not None:
+        if noise is None:
+            reasons.append("missing input_referred_noise_v")
+        elif noise > resolved["max_noise_v"]:
+            reasons.append(
+                f"noise_v={noise * 1e6:.1f}uV > max {resolved['max_noise_v'] * 1e6:.1f}uV"
+            )
+    if resolved["max_kickback_v"] is not None:
+        if kickback is None:
+            reasons.append("missing kickback_noise_v")
+        elif kickback > resolved["max_kickback_v"]:
+            reasons.append(
+                f"kickback_v={kickback * 1e3:.2f}mV > max {resolved['max_kickback_v'] * 1e3:.2f}mV"
+            )
+    if resolved["min_output_swing_v"] is not None:
+        if output_swing is None:
+            reasons.append("missing output_swing_v")
+        elif output_swing < resolved["min_output_swing_v"]:
+            reasons.append(
+                f"output_swing_v={output_swing:.3f}V < min {resolved['min_output_swing_v']:.3f}V"
+            )
+    if resolved.get("min_voh_v") is not None:
+        if voh is None:
+            reasons.append("missing voh_v")
+        elif voh < resolved["min_voh_v"]:
+            reasons.append(f"voh_v={voh:.3f}V < min {resolved['min_voh_v']:.3f}V")
+    if resolved.get("max_vol_v") is not None:
+        if vol is None:
+            reasons.append("missing vol_v")
+        elif vol > resolved["max_vol_v"]:
+            reasons.append(f"vol_v={vol:.3f}V > max {resolved['max_vol_v']:.3f}V")
+    if resolved.get("max_overshoot_v") is not None:
+        if overshoot is None:
+            reasons.append("missing overshoot_v")
+        elif overshoot > resolved["max_overshoot_v"]:
+            reasons.append(
+                f"overshoot_v={overshoot:.3f}V > max {resolved['max_overshoot_v']:.3f}V"
+            )
+    return "; ".join(dict.fromkeys(reasons))
+
+
+def is_record_feasible(
+    record: Mapping[str, Any],
+    resolved: Mapping[str, Any],
+) -> bool:
+    """Return True iff the candidate succeeded, has all required metrics, and meets all constraints."""
+    return describe_constraint_violations(record, resolved) == ""
 
 
 def _run_ngspice(
     runner: NgspiceRun,
     deck: Path,
     workdir: Path,
-    expected_outputs: Sequence[Path],
+    primary_outputs: Sequence[Path],
 ) -> None:
+    write_spiceinit(workdir)
     result = runner.run(deck.resolve(), workdir.resolve(), execute=True)
     if result.get("returncode") != 0:
         raise RuntimeError(
@@ -496,7 +804,7 @@ def _run_ngspice(
         raise RuntimeError("ngspice reported a fatal error; see ngspice.log")
     missing = [
         output.name
-        for output in expected_outputs
+        for output in primary_outputs
         if not output.is_file() or output.stat().st_size == 0
     ]
     if missing:
@@ -541,12 +849,13 @@ def _evaluate_sample(
     sample_name = f"{run_name}_{index:06d}"
     sample_dir = _sample_dir(run_dir, index)
     sample_dir.mkdir(parents=True)
-    record = {
+    record: dict[str, Any] = {
         "name": sample_name,
         "status": "failed",
         "x_norm": [float(value) for value in vector],
         "size": dict(sizes),
         "metrics": {},
+        "failure_info": None,
         "files": {},
         "error": "",
     }
@@ -555,18 +864,21 @@ def _evaluate_sample(
     transient_config = analyses.get("transient", {})
 
     if isinstance(runner, MockRunner):
-        record.update(runner.evaluate(
-            sizes,
-            np.asarray(vector, dtype=float),
-            sample_index=index,
-            vdd_v=float(transient_config.get("vdd_v", 1.8)),
-        ))
+        record.update(
+            runner.evaluate(
+                sizes,
+                np.asarray(vector, dtype=float),
+                sample_index=index,
+                vdd_v=float(transient_config.get("vdd_v", 1.8)),
+            )
+        )
         record.update(record["metrics"])
         _atomic_json(sample_dir / "result.json", record)
         return record
 
     deck_path = sample_dir / "netlist.spice"
     deck_text = render_sized_deck(template, sizes, sizing_config)
+    deck_text = rewrite_deck_with_reduced_models(deck_text)
     deck_path.write_text(deck_text, encoding="utf-8")
 
     transient_waveform = sample_dir / str(transient_config.get("waveform", "transient.txt"))
@@ -580,18 +892,73 @@ def _evaluate_sample(
     kickback_config = analyses.get("kickback", {})
     kickback_waveform = sample_dir / str(kickback_config.get("waveform", "kickback.txt"))
 
-    expected_outputs: list[Path] = []
-    if transient_config.get("enabled", True):
-        expected_outputs.append(transient_waveform)
+    transient_enabled = bool(transient_config.get("enabled", True))
+    primary_outputs: list[Path] = [transient_waveform] if transient_enabled else []
+
+    secondary_outputs: list[Path] = []
     if gain_config.get("enabled", False):
-        expected_outputs.append(gain_waveform)
+        secondary_outputs.append(gain_waveform)
     if offset_config.get("enabled", False):
-        expected_outputs.append(offset_metrics_file)
+        secondary_outputs.append(offset_metrics_file)
     if noise_config.get("enabled", False):
-        expected_outputs.append(noise_waveform)
+        secondary_outputs.append(noise_waveform)
     if kickback_config.get("enabled", False):
-        expected_outputs.append(kickback_waveform)
-    deduped_outputs = list(dict.fromkeys(expected_outputs))
+        secondary_outputs.append(kickback_waveform)
+    secondary_outputs = list(dict.fromkeys(secondary_outputs))
+
+    errors: list[str] = []
+    try:
+        _run_ngspice(
+            runner,
+            deck_path,
+            sample_dir,
+            primary_outputs if primary_outputs else secondary_outputs,
+        )
+    except EVALUATION_ERRORS as exc:
+        record["error"] = f"ngspice: {type(exc).__name__}: {exc}"
+        _atomic_json(sample_dir / "result.json", record)
+        return record
+
+    if transient_enabled:
+        try:
+            power_window = transient_config.get("power_window_s")
+            record["metrics"].update(
+                extract_delay(
+                    transient_waveform,
+                    float(transient_config["vdd_v"]),
+                    float(transient_config["period_s"]),
+                    output_positive=str(transient_config.get("output_positive", "v(X)")),
+                    output_negative=str(transient_config.get("output_negative", "v(Y)")),
+                    clock_vector=str(transient_config.get("clock_vector", "v(ck)")),
+                    input_positive=transient_config.get("input_positive", "v(inp)"),
+                    input_negative=transient_config.get("input_negative", "v(inn)"),
+                    power_vector=str(transient_config.get("power_vector", "p_inst")),
+                    power_from_s=float(power_window[0]) if power_window else None,
+                    power_to_s=float(power_window[1]) if power_window else None,
+                    reset_threshold_ratio=float(transient_config.get("reset_threshold_ratio", 0.9)),
+                    inverting=bool(transient_config.get("inverting", True)),
+                    check_polarity=bool(transient_config.get("check_polarity", True)),
+                )
+            )
+        except TransientFailureError as exc:
+            record["failure_info"] = exc.as_dict()
+            record["error"] = f"transient: {type(exc).__name__}: {exc}"
+            _atomic_json(sample_dir / "result.json", record)
+            return record
+        except EVALUATION_ERRORS as exc:
+            record["error"] = f"transient: {type(exc).__name__}: {exc}"
+            _atomic_json(sample_dir / "result.json", record)
+            return record
+
+    missing_secondary = [
+        out.name for out in secondary_outputs if not out.is_file() or out.stat().st_size == 0
+    ]
+    if missing_secondary:
+        record["error"] = (
+            f"ngspice: RuntimeError: missing secondary output(s) ({', '.join(missing_secondary)})"
+        )
+        _atomic_json(sample_dir / "result.json", record)
+        return record
 
     record["files"].update(
         deck=str(deck_path.relative_to(run_dir)),
@@ -599,7 +966,7 @@ def _evaluate_sample(
         **{
             key: str(path.relative_to(run_dir))
             for key, enabled, path in (
-                ("transient", transient_config.get("enabled", True), transient_waveform),
+                ("transient", transient_enabled, transient_waveform),
                 ("ac", gain_config.get("enabled", False), gain_waveform),
                 ("noise", noise_config.get("enabled", False), noise_waveform),
                 ("kickback", kickback_config.get("enabled", False), kickback_waveform),
@@ -609,79 +976,57 @@ def _evaluate_sample(
         },
     )
 
-    errors: list[str] = []
-    try:
-        _run_ngspice(runner, deck_path, sample_dir, deduped_outputs)
-    except EVALUATION_ERRORS as exc:
-        record["error"] = f"ngspice: {type(exc).__name__}: {exc}"
-        _atomic_json(sample_dir / "result.json", record)
-        return record
-
-    if transient_config.get("enabled", True):
-        try:
-            power_window = transient_config.get("power_window_s")
-            record["metrics"].update(extract_delay(
-                transient_waveform,
-                float(transient_config["vdd_v"]),
-                float(transient_config["period_s"]),
-                output_positive=str(transient_config.get("output_positive", "v(X)")),
-                output_negative=str(transient_config.get("output_negative", "v(Y)")),
-                clock_vector=str(transient_config.get("clock_vector", "v(ck)")),
-                input_positive=transient_config.get("input_positive", "v(inp)"),
-                input_negative=transient_config.get("input_negative", "v(inn)"),
-                power_vector=str(transient_config.get("power_vector", "p_inst")),
-                power_from_s=float(power_window[0]) if power_window else None,
-                power_to_s=float(power_window[1]) if power_window else None,
-                reset_threshold_ratio=float(transient_config.get("reset_threshold_ratio", 0.9)),
-                inverting=bool(transient_config.get("inverting", True)),
-                check_polarity=bool(transient_config.get("check_polarity", True)),
-            ))
-        except EVALUATION_ERRORS as exc:
-            errors.append(f"transient: {type(exc).__name__}: {exc}")
-
     if gain_config.get("enabled", False):
         try:
-            record["metrics"].update(extract_gain(
-                gain_waveform,
-                output_positive=str(gain_config.get("output_positive", "v(X)")),
-                output_negative=str(gain_config.get("output_negative", "v(Y)")),
-                input_positive=str(gain_config.get("input_positive", "v(inp)")),
-                input_negative=str(gain_config.get("input_negative", "v(inn)")),
-            ))
+            record["metrics"].update(
+                extract_gain(
+                    gain_waveform,
+                    output_positive=str(gain_config.get("output_positive", "v(X)")),
+                    output_negative=str(gain_config.get("output_negative", "v(Y)")),
+                    input_positive=str(gain_config.get("input_positive", "v(inp)")),
+                    input_negative=str(gain_config.get("input_negative", "v(inn)")),
+                )
+            )
         except EVALUATION_ERRORS as exc:
             errors.append(f"gain: {type(exc).__name__}: {exc}")
 
     if offset_config.get("enabled", False):
         try:
-            record["metrics"].update(extract_offset_metric(
-                offset_metrics_file,
-                key=str(offset_config.get("key", "input_referred_offset_v")),
-            ))
+            record["metrics"].update(
+                extract_offset_metric(
+                    offset_metrics_file,
+                    key=str(offset_config.get("key", "input_referred_offset_v")),
+                )
+            )
         except EVALUATION_ERRORS as exc:
             errors.append(f"offset: {type(exc).__name__}: {exc}")
 
     if noise_config.get("enabled", False):
         try:
-            record["metrics"].update(extract_noise(
-                noise_waveform,
-                dc_gain_v_per_v=record["metrics"].get("dc_gain_v_per_v"),
-                metrics_path=noise_metrics_file,
-                output_spectrum=str(noise_config.get("output_spectrum", "onoise_spectrum")),
-            ))
+            record["metrics"].update(
+                extract_noise(
+                    noise_waveform,
+                    dc_gain_v_per_v=record["metrics"].get("dc_gain_v_per_v"),
+                    metrics_path=noise_metrics_file,
+                    output_spectrum=str(noise_config.get("output_spectrum", "onoise_spectrum")),
+                )
+            )
         except EVALUATION_ERRORS as exc:
             errors.append(f"noise: {type(exc).__name__}: {exc}")
 
     if kickback_config.get("enabled", False):
         try:
             kb_window = kickback_config.get("window_s", (1.0e-9, 3.0e-9))
-            record["metrics"].update(extract_kickback(
-                kickback_waveform,
-                from_s=float(kb_window[0]),
-                to_s=float(kb_window[1]),
-                differential_vector=str(
-                    kickback_config.get("differential_vector", "vkb_diff")
-                ),
-            ))
+            record["metrics"].update(
+                extract_kickback(
+                    kickback_waveform,
+                    from_s=float(kb_window[0]),
+                    to_s=float(kb_window[1]),
+                    differential_vector=str(
+                        kickback_config.get("differential_vector", "vkb_diff")
+                    ),
+                )
+            )
         except EVALUATION_ERRORS as exc:
             errors.append(f"kickback: {type(exc).__name__}: {exc}")
 
@@ -765,14 +1110,13 @@ def run_rl_sizing(
             raise FileNotFoundError(f"resume run directory does not exist: {resume_path}")
         run_dir = resume_path
         run_id = run_dir.name
-        results_path = run_dir / "results.json"
-        if not results_path.is_file():
-            raise FileNotFoundError(f"resume run is missing results.json: {results_path}")
-        previous_metadata = json.loads(results_path.read_text(encoding="utf-8"))
-        if previous_metadata.get("algorithm") != algorithm:
+        csv_path = run_dir / "results.csv"
+        if not csv_path.is_file():
+            raise FileNotFoundError(f"resume run is missing results.csv: {csv_path}")
+        existing_samples, prev_algo, _ = _load_existing_results_csv(csv_path, sizing_config)
+        if prev_algo is not None and prev_algo != algorithm:
             raise ValueError(
-                f"resume algorithm {algorithm!r} does not match "
-                f"run algorithm {previous_metadata.get('algorithm')!r}"
+                f"resume algorithm {algorithm!r} does not match run algorithm {prev_algo!r}"
             )
         checkpoint_dir = run_dir / "checkpoints" / algorithm
         checkpoint_model = checkpoint_dir / "model.zip"
@@ -780,14 +1124,6 @@ def run_rl_sizing(
             raise FileNotFoundError(
                 f"resume checkpoint model does not exist: {checkpoint_model}"
             )
-        existing_samples = previous_metadata.get("samples", [])
-        previous_algorithm = previous_metadata.get("algorithm")
-        previous_seed = previous_metadata.get("seed")
-        for existing_sample in existing_samples:
-            if "algorithm" not in existing_sample and previous_algorithm is not None:
-                existing_sample["algorithm"] = previous_algorithm
-            if "seed" not in existing_sample and previous_seed is not None:
-                existing_sample["seed"] = previous_seed
     else:
         if run_id is None:
             run_id = datetime.now(timezone.utc).strftime("run_%Y_%m_%d_%H_%M")
@@ -802,8 +1138,8 @@ def run_rl_sizing(
             raise FileExistsError(f"run directory is not empty: {run_dir}")
         run_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_dir = run_dir / "checkpoints" / algorithm
-        checkpoint_model = checkpoint_dir / "model.zip"
         existing_samples = []
+
     (run_dir / "sizing.yaml").write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
     (run_dir / "scoring.yaml").write_text(score_path.read_text(encoding="utf-8"), encoding="utf-8")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -812,27 +1148,11 @@ def run_rl_sizing(
     if verbose >= 2:
         print(f"Resolved score: {resolved}", file=sys.stderr)
         print(f"Score config: {score_path}", file=sys.stderr)
-    metadata = {
-        "name": run_id,
-        "runner": runner_name,
-        "algorithm": algorithm,
-        "metaheuristic": "NRBO",
-        "netlist": str(netlist_dir),
-        "seed": seed,
-        "population_size": population_size,
-        "workers": workers,
-        "rl_timesteps": timesteps,
-        "episode_length": episode_length,
-        "samples_requested": samples,
-        "keep": keep,
-        "resumed_from": str(run_dir) if resume is not None else None,
-        "checkpoint_dir": str(checkpoint_dir) if resume is not None or checkpoint_dir else None,
-        "score_config": str(score_path),
-        "resolved_score": resolved,
-        "status": "running",
-        "samples": existing_samples,
+
+    all_samples: list[dict[str, Any]] = list(existing_samples)
+    records_by_name: dict[str, dict[str, Any]] = {
+        str(s["name"]): s for s in all_samples if s.get("name")
     }
-    _atomic_json(run_dir / "results.json", metadata)
 
     if verbose >= 1:
         keep_label = "all" if keep is None else str(keep)
@@ -847,7 +1167,7 @@ def run_rl_sizing(
         if runner_name == "mock"
         else NgspiceRun(timeout_s=timeout_s)
     )
-    evaluated_by_vector = {}
+    evaluated_by_vector: dict[tuple[float, ...], dict[str, Any]] = {}
 
     for existing_sample in existing_samples:
         existing_vector = existing_sample.get("x_norm")
@@ -944,6 +1264,7 @@ def run_rl_sizing(
                 "x_norm": [float(value) for value in vector],
                 "size": sizes,
                 "metrics": {},
+                "failure_info": None,
                 "files": {},
                 "error": f"{type(exc).__name__}: {exc}",
             }
@@ -957,24 +1278,24 @@ def run_rl_sizing(
         record["algorithm"] = algorithm
         record["iteration"] = int(iteration)
         record["seed"] = seed
-        record["metrics"]["rl_objective_score"] = objective_score(record)
-        record["metrics"]["rl_feasible"] = is_feasible(record)
+        score_val = objective_score(record)
+        violations_str = describe_constraint_violations(record, resolved)
+        feasible_flag = violations_str == ""
+        record["metrics"]["rl_objective_score"] = score_val
+        record["metrics"]["rl_feasible"] = feasible_flag
+        record["metrics"]["constraint_violations"] = violations_str
+        record["constraint_violations"] = violations_str
         record.update(record["metrics"])
         if verbose >= 1:
             print(
                 f"Evaluated {index}/{total_evaluations}: "
-                f"score={record['metrics']['rl_objective_score']:.6g}, "
-                f"feasible={record['metrics']['rl_feasible']}, status={record['status']}",
+                f"score={score_val:.6g}, "
+                f"feasible={feasible_flag}, status={record['status']}",
                 file=sys.stderr,
             )
         _atomic_json(_sample_dir(run_dir, index) / "result.json", record)
-        metadata["samples"].append(record)
-        metadata["completed_samples"] = len(metadata["samples"])
-        metadata["status"] = (
-            "complete"
-            if all(item.get("status") == "evaluated" for item in metadata["samples"])
-            else "partial"
-        )
+        all_samples.append(record)
+        records_by_name[record["name"]] = record
         evaluated_by_vector[key] = record
         if keep is not None:
             kept_records[index] = record
@@ -987,12 +1308,11 @@ def run_rl_sizing(
                 )
             _write_results_csv(
                 run_dir / "results.csv",
-                metadata["samples"],
+                all_samples,
                 design_names=design_names,
                 algorithm=algorithm,
                 seed=seed,
             )
-            _atomic_json(run_dir / "results.json", metadata)
         return record
 
     def evaluate_candidates(
@@ -1057,28 +1377,24 @@ def run_rl_sizing(
     )
     if verbose >= 1:
         print(f"Ranking {len(candidates)} measured candidates", file=sys.stderr)
-    candidate_payload = {
-        "algorithm": algorithm,
-        "metaheuristic": "NRBO",
-        "score_config": str(score_path),
-        "resolved_score": resolved,
-        "candidates": candidates,
-        "note": "Candidates are ranked from direct measurements; no surrogate model is used.",
-    }
-    _atomic_json(run_dir / "candidates.json", candidate_payload)
+    _write_candidates_csv(
+        run_dir / "candidates.csv",
+        candidates,
+        design_names=design_names,
+        algorithm=algorithm,
+        seed=seed,
+        records_by_name=records_by_name,
+    )
     _write_results_csv(
         run_dir / "results.csv",
-        metadata["samples"],
+        all_samples,
         design_names=design_names,
         algorithm=algorithm,
         seed=seed,
     )
-    metadata["completed_at"] = datetime.now(timezone.utc).isoformat()
-    metadata["candidate_count"] = len(candidates)
-    _atomic_json(run_dir / "results.json", metadata)
     if verbose >= 1:
         print(
-            f"Completed {run_id}: {len(metadata['samples'])} measured evaluations, "
+            f"Completed {run_id}: {len(all_samples)} measured evaluations, "
             f"{len(candidates)} returned candidates",
             file=sys.stderr,
         )

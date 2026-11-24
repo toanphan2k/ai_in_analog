@@ -91,13 +91,62 @@ def _resolve_waveform_path(run_dir: Path, sample_id: str, waveform_name: str) ->
     return None, folder_candidates[0]
 
 
+def _row_to_candidate(row: dict[str, str]) -> dict[str, Any]:
+    def _f(key: str) -> float:
+        raw = (row.get(key) or "").strip()
+        if not raw:
+            return math.nan
+        try:
+            val = float(raw)
+        except ValueError:
+            return math.nan
+        return val if math.isfinite(val) else math.nan
+
+    score = _f("rl_objective_score")
+    metrics = {
+        "delay_s": _f("delay_s"),
+        "delay_mean_s": _f("delay_mean_s"),
+        "reset_time_s": _f("reset_time_s"),
+        "output_swing_v": _f("output_swing_v"),
+        "voh_v": _f("voh_v"),
+        "vol_v": _f("vol_v"),
+        "overshoot_v": _f("overshoot_v"),
+        "power_w": _f("power_w"),
+        "input_referred_offset_v": _f("input_referred_offset_v"),
+        "input_referred_noise_v": _f("input_referred_noise_v"),
+        "kickback_noise_v": _f("kickback_noise_v"),
+    }
+    return {
+        "sample": (row.get("sample") or "").strip(),
+        "score": score,
+        "feasible": (row.get("rl_feasible") or "").strip().lower() in {"true", "1", "yes"},
+        "metrics": metrics,
+    }
+
+
 def _load_top_candidates(csv_path: Path, top_k: int) -> list[dict[str, Any]]:
+    import csv
+
     run_dir = csv_path.parent
     candidates: list[dict[str, Any]] = []
     seen_samples: set[str] = set()
 
+    # 1. Primary: candidates.csv
+    cand_csv = run_dir / "candidates.csv"
+    if cand_csv.is_file():
+        with cand_csv.open("r", newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                sample_id = (row.get("sample") or "").strip()
+                if not sample_id or sample_id in seen_samples:
+                    continue
+                seen_samples.add(sample_id)
+                candidates.append(_row_to_candidate(row))
+                if len(candidates) >= top_k:
+                    return candidates
+
+    # 2. Legacy fallback: candidates.json
     cand_json = run_dir / "candidates.json"
-    if cand_json.is_file():
+    if cand_json.is_file() and len(candidates) < top_k:
         try:
             payload = json.loads(cand_json.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -111,21 +160,9 @@ def _load_top_candidates(csv_path: Path, top_k: int) -> list[dict[str, Any]]:
             if len(candidates) >= top_k:
                 return candidates
 
-    # Fall back to ranking rows from results.csv if candidates.json is missing or has fewer than top_k
-    import csv
-
+    # 3. Fallback: rank evaluated rows from results.csv
     with csv_path.open("r", newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-
-    def _f(row: dict[str, str], key: str) -> float:
-        raw = (row.get(key) or "").strip()
-        if not raw:
-            return math.nan
-        try:
-            val = float(raw)
-        except ValueError:
-            return math.nan
-        return val if math.isfinite(val) else math.nan
 
     evaluated_rows = [
         r for r in rows if (r.get("status") or "").strip().lower() == "evaluated"
@@ -133,7 +170,9 @@ def _load_top_candidates(csv_path: Path, top_k: int) -> list[dict[str, Any]]:
     evaluated_rows.sort(
         key=lambda r: (
             0 if (r.get("rl_feasible") or "").strip().lower() in {"true", "1", "yes"} else 1,
-            _f(r, "rl_objective_score") if math.isfinite(_f(r, "rl_objective_score")) else math.inf,
+            _row_to_candidate(r)["score"]
+            if math.isfinite(_row_to_candidate(r)["score"])
+            else math.inf,
         )
     )
     for row in evaluated_rows:
@@ -141,25 +180,7 @@ def _load_top_candidates(csv_path: Path, top_k: int) -> list[dict[str, Any]]:
         if not sample_id or sample_id in seen_samples:
             continue
         seen_samples.add(sample_id)
-        score = _f(row, "rl_objective_score")
-        metrics = {
-            "delay_s": _f(row, "delay_s"),
-            "delay_mean_s": _f(row, "delay_mean_s"),
-            "reset_time_s": _f(row, "reset_time_s"),
-            "output_swing_v": _f(row, "output_swing_v"),
-            "power_w": _f(row, "power_w"),
-            "input_referred_offset_v": _f(row, "input_referred_offset_v"),
-            "input_referred_noise_v": _f(row, "input_referred_noise_v"),
-            "kickback_noise_v": _f(row, "kickback_noise_v"),
-        }
-        candidates.append(
-            {
-                "sample": sample_id,
-                "score": score,
-                "feasible": (row.get("rl_feasible") or "").strip().lower() in {"true", "1", "yes"},
-                "metrics": metrics,
-            }
-        )
+        candidates.append(_row_to_candidate(row))
         if len(candidates) >= top_k:
             break
     return candidates
@@ -261,8 +282,8 @@ def _plot_single_candidate(
         ax0_r = ax0.twinx()
         ax0_r.spines["top"].set_visible(False)
         ax0_r.grid(False)
-        ax0_r.plot(tl, vin_diff_mv, color="#d62728", lw=1.4, ls="--", label="v(inp) - v(inn)")
-        ax0_r.set_ylabel("Vin_diff (mV)", color="#d62728")
+        ax0_r.plot(tl, vin_diff_mv, color="#d62728", lw=1.4, ls="--", label="Vin+ - Vin-")
+        ax0_r.set_ylabel("Vin+ - Vin- (mV)", color="#d62728")
         vspan = max(float(np.max(np.abs(vin_diff_mv))), 10.0) * 1.4
         ax0_r.set_ylim(-vspan, vspan)
         lines0r, labels0r = ax0_r.get_legend_handles_labels()
@@ -359,7 +380,7 @@ def _plot_single_candidate(
     zoom_title = f"Zoom: Worst-Case Cycle #{worst_idx}"
     if vinp is not None and vinn is not None:
         vin_at_edge_mv = (float(np.interp(worst_edge, t, vinp)) - float(np.interp(worst_edge, t, vinn))) * 1e3
-        zoom_title += f" (Vin_diff={vin_at_edge_mv:+.0f} mV)"
+        zoom_title += f" (Vin+ - Vin- = {vin_at_edge_mv:+.0f} mV)"
     ax_zt.set_title(zoom_title)
     ax_zt.legend(loc="lower right", fontsize=8.0)
     plt.setp(ax_zt.get_xticklabels(), visible=False)
@@ -486,21 +507,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         description=__doc__ or "Plot transient waveforms for top-K best candidates."
     )
     parser.add_argument(
+        "--output-dir",
         "--data-dir",
         "--csv",
-        dest="data_dir",
+        dest="output_dir",
         nargs="+",
         required=True,
-        help="path(s) to run directory(ies) (e.g. run/strongarm/<run_id>) or results.csv file(s)",
+        help="path(s) to run output directory(ies) (e.g. run/strongarm_5ghz/<run_id>) or results.csv file(s)",
     )
     parser.add_argument(
         "-o",
-        "--output-dir",
+        "--plot-dir",
+        dest="plot_dir",
         type=Path,
         default=None,
         help=(
             "directory for output PNGs "
-            "(default: <ws>/plot_<algorithm>_seed_<seed>_iteration_<iteration>/)"
+            "(default: <ws>/plot_<algorithm>_seed_<seed>_iteration_<iteration>_<run_id>/)"
         ),
     )
     parser.add_argument(
@@ -520,8 +543,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--show", action="store_true", help="display plots interactively")
     args = parser.parse_args(argv)
     plot_transient_waveforms(
-        args.data_dir,
-        output_dir=args.output_dir,
+        args.output_dir,
+        output_dir=args.plot_dir,
         top_k=args.top_k,
         overview_cycles=args.overview_cycles,
         title=args.title,

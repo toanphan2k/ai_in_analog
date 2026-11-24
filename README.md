@@ -105,9 +105,8 @@ penalty:
   type: quadratic
 ```
 
-The score is read only from `netlists/<design>/scoring.yaml`. The resolved
-scoring configuration is stored in `candidates.json`, `results.json`, and
-`run/<design>/<run-id>/scoring.yaml`.
+The score is read only from `netlists/<design>/scoring.yaml`. A snapshot of the active
+scoring configuration is saved to `run/<design>/<run-id>/scoring.yaml`.
 
 ### Score formula
 
@@ -148,10 +147,13 @@ $$
 
 Single-objective CLI selection has been removed. Every candidate is scored from the
 weighted terms and constraints in `scoring.yaml`; set the weights and limits to balance the
-desired metrics. Failed candidates or candidates missing a weighted or constrained metric receive
-`scoring.infeasible_score` (default $1000.0$) and are marked infeasible. Candidates violating any
-configured constraint are marked infeasible, incur the quadratic (or linear) penalty scaled by
-$\lambda$, and are sorted after feasible candidates in `candidates.json`.
+desired metrics. Transient comparator failures receive a smooth graded penalty in
+$[0.5 \cdot S_{\text{infeasible}},\, S_{\text{infeasible}}]$ based on how close $|V_X - V_Y|$
+and reset recovery came to their thresholds (providing a continuous gradient into the switching
+region), while hard simulator crashes receive `scoring.infeasible_score` (default $1000.0$).
+Candidates violating any configured constraint are marked infeasible, incur the quadratic (or
+linear) penalty scaled by $\lambda$, record human-readable reasons in `constraint_violations`,
+and are sorted after feasible candidates in `candidates.csv`.
 
 The RL reward is separate from the candidate score:
 
@@ -193,22 +195,41 @@ available CPU cores) parallelizes all simulations in each reset and step generat
 Use `--keep N` (e.g., `--keep 50`) to prune per-evaluation folders under `data/sample_XXXXXX/`
 during long runs, keeping raw SPICE decks and waveforms on disk **only for the `N` best
 candidates** (default keeps all; `--keep 0` removes all sample folders). All measured metrics,
-sizes, and scores remain in `results.csv` and `results.json`, and all plotting scripts including
-Plot 6 transient waveforms continue to work as long as `N >= --top-k`.
+sizes, and scores remain in `results.csv`, and all plotting scripts including Plot 6 transient
+waveforms continue to work as long as `N >= --top-k`.
 
-Use `-v` to print start, candidate evaluation, checkpoint, ranking, and completion progress.
-Use `-vv` to add resolved scoring configuration and score-config path details.
+Use `-v` to print start, candidate evaluation (`Evaluated X/Total`), checkpoint, ranking, and
+completion progress. Use `-vv` to add resolved scoring configuration and score-config path details.
 Default run IDs use `run_YYYY_MM_DD_HH_MM`; for example:
-`run/strongarm/run_2026_11_20_17_07/`. A custom `--run-id test` becomes `run_test`; a
+`run/strongarm_5ghz/run_2026_11_20_17_07/`. A custom `--run-id test` becomes `run_test`; a
 custom value already starting with `run_` is not prefixed again.
 
-The run directory contains `candidates.json`, `results.json`/`results.csv`, the sizing and
-scoring config snapshots, `checkpoints/`, and per-evaluation sample folders (`sample_XXXXXX/`
-containing decks, logs, waveforms, and metrics) under `data/`. `results.csv` records
-`sample`, `algorithm`, `iteration`, `seed`, `status`, individual design W/L columns parsed from
-`sizing.yaml` (e.g., `w_in`, `l_in`, `w_n`, `w_p`, `w_rst`, `w_tail`, `w_8`, `l_8`), extracted
-metrics, `rl_objective_score`, `rl_feasible`, and `error`. Candidate rankings are based on
-direct simulator measurements, not surrogate predictions.
+The run directory contains `candidates.csv`, `results.csv`, the sizing and scoring config
+snapshots, `checkpoints/`, and per-evaluation sample folders (`sample_XXXXXX/` containing decks,
+logs, waveforms, and metrics) under `data/`. `results.csv` and `candidates.csv` record `sample`,
+`algorithm`, `iteration`, `seed`, `status`, individual design W/L columns parsed from
+`sizing.yaml` (`w_in`, `l_in`, `w_n`, `w_p`, `w_rst`, `w_tail`, `w_8`, `l_8`), extracted metrics
+(including `voh_v`, `vol_v`, `overshoot_v`, `ac_freq_points`), `rl_objective_score`,
+`rl_feasible`, `constraint_violations`, and `error`. Candidate rankings are based on direct
+simulator measurements, not surrogate predictions.
+
+## Post-Search Validation (Top-K Candidates)
+
+Validate the top-K candidates of a completed run across small-input overdrive (`±1/5/10/100 mV`),
+PVT corners (`tt, ff, ss, sf, fs` × `0/27/85 °C` × `VDD ± 10%`), and Monte-Carlo transient
+mismatch offset bisection:
+
+```bash
+python3 scripts/validate_candidates.py \
+  --output-dir run/strongarm_5ghz/<run-id> \
+  --top-k 5 \
+  --workers 8 \
+  --mc-samples 16
+```
+
+Validation CSVs (`validation_summary.csv`, `small_input_delay.csv`, `pvt_corners.csv`,
+`monte_carlo_offset.csv`) are written to `run/<design>/<run-id>/validation/`. Add `--fast` for a
+quick 5-extreme-corner check.
 
 ## Plotting Results
 
@@ -222,12 +243,12 @@ generate all standard plots together):
 - `plot/plot_kickback_vs_noise.py` — Plot 5: Kickback vs. Input-Referred Noise (with feasible Pareto front)
 - `plot/plot_transient_waveforms.py` — Plot 6: Transient Waveforms for Top-K Best Candidates (default `--top-k 5`)
 
-Generate a single plot or all plots from one or more run directories:
+Generate a single plot or all plots from one or more run output directories:
 
 ```bash
-python3 plot/plot_objective_score.py --data-dir run/strongarm/<run-id>
-python3 plot/plot_transient_waveforms.py --data-dir run/strongarm/<run-id> --top-k 5
-python3 plot/plot.py --data-dir run/strongarm/<run-id>
+python3 plot/plot_objective_score.py --output-dir run/strongarm_5ghz/<run-id>
+python3 plot/plot_transient_waveforms.py --output-dir run/strongarm_5ghz/<run-id> --top-k 5
+python3 plot/plot.py --output-dir run/strongarm_5ghz/<run-id>
 ```
 
 Compare multiple runs (e.g., PPO vs. SAC or multiple seeds) on the same axes by passing multiple
@@ -235,18 +256,18 @@ run directories:
 
 ```bash
 python3 plot/plot.py \
-  --data-dir run/strongarm/<ppo-run> run/strongarm/<sac-run>
+  --output-dir run/strongarm_5ghz/<ppo-run> run/strongarm_5ghz/<sac-run>
 ```
 
 By default, PNGs are saved outside `run/` into the workspace directory:
 
 ```text
-plot_<algorithm>_seed_<seed>_iteration_<iteration>/
+plot_<algorithm>_seed_<seed>_iteration_<iteration>_<run-time-id>/
 ```
 
-Use `-o/--output` (for individual scripts) or `-o/--output-dir` (for `plot/plot.py`) to
-override the output path, `--dpi` to adjust resolution, and `--show` to open an interactive
-window.
+Use `-o/--save-path` (for individual scripts) or `-o/--plot-dir` (for `plot/plot.py` and
+`plot/plot_transient_waveforms.py`) to override where PNGs are saved, `--dpi` to adjust
+resolution, and `--show` to open an interactive window.
 
 ## Resume a checkpoint
 

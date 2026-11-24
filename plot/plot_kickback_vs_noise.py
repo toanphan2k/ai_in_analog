@@ -41,8 +41,12 @@ def plot_kickback_vs_noise(
     fig, ax = plt.subplots(figsize=(8.5, 5.2))
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
-    all_noise = np.concatenate([r.noise_v for r in runs])
-    all_kickback = np.concatenate([r.kickback_v for r in runs])
+    all_noise = np.concatenate(
+        [r.noise_v[[s.lower() != "failed" for s in r.statuses]] for r in runs]
+    )
+    all_kickback = np.concatenate(
+        [r.kickback_v[[s.lower() != "failed" for s in r.statuses]] for r in runs]
+    )
     noise_scale, noise_unit = select_unit(all_noise, VOLTAGE_UNITS)
     kickback_scale, kickback_unit = select_unit(all_kickback, VOLTAGE_UNITS)
 
@@ -50,7 +54,8 @@ def plot_kickback_vs_noise(
     plotted_any = False
     for idx, run in enumerate(runs):
         color = colors[idx % len(colors)]
-        valid = np.isfinite(run.noise_v) & np.isfinite(run.kickback_v)
+        not_failed = np.array([s.lower() != "failed" for s in run.statuses], dtype=bool)
+        valid = not_failed & np.isfinite(run.noise_v) & np.isfinite(run.kickback_v)
         if not np.any(valid):
             continue
         plotted_any = True
@@ -133,8 +138,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--log-y", action="store_true", help="use log scale for Kickback axis")
     args = parser.parse_args(argv)
     plot_kickback_vs_noise(
-        args.data_dir,
-        output=args.output,
+        args.output_dir,
+        output=args.save_path,
         title=args.title,
         dpi=args.dpi,
         show=args.show,

@@ -16,6 +16,9 @@ class StrongArmMetrics:
     kickback_noise_v: float
     output_swing_v: float
     fmax_hz: float
+    voh_v: float = float("nan")
+    vol_v: float = float("nan")
+    overshoot_v: float = float("nan")
     reset_time_s: float = float("nan")
     dc_gain_v_per_v: float = float("nan")
     energy_j: float = float("nan")

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import math
 import re
 import sys
@@ -103,18 +102,6 @@ def load_results_csv(csv_paths: Sequence[str | Path]) -> list[RunData]:
             raise ValueError(f"CSV file contains no data rows: {path}")
         algorithms = sorted({r.get("algorithm", "").strip() for r in rows if r.get("algorithm", "").strip()})
         seeds = sorted({r.get("seed", "").strip() for r in rows if r.get("seed", "").strip()})
-        if not algorithms or not seeds:
-            sibling_json = path.parent / "results.json"
-            if sibling_json.is_file():
-                try:
-                    meta = json.loads(sibling_json.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    meta = {}
-                if isinstance(meta, dict):
-                    if not algorithms and meta.get("algorithm") is not None:
-                        algorithms = [str(meta["algorithm"]).strip()]
-                    if not seeds and meta.get("seed") is not None:
-                        seeds = [str(meta["seed"]).strip()]
         algo_str = "/".join(algorithms)
         seed_str = "/".join(seeds)
         raw_meta.append((path, algo_str, seed_str))
@@ -227,11 +214,20 @@ def _sanitize_token(value: str) -> str:
     return cleaned or "unknown"
 
 
+def _extract_run_time_id(path: Path) -> str:
+    """Extract the run time/id suffix (e.g. '2026_11_23_05_49' from 'run_2026_11_23_05_49')."""
+    parent_name = path.parent.name
+    if parent_name.startswith("run_") and len(parent_name) > 4:
+        return parent_name[4:]
+    return parent_name or path.stem
+
+
 def default_output_dir(runs: Sequence[RunData]) -> Path:
-    """Build default output dir: <ws>/plot_<algorithm>_seed_<seed>_iteration_<iteration>."""
+    """Build default output dir: <ws>/plot_<algorithm>_seed_<seed>_iteration_<iteration>_<run_time_id>."""
     algorithms: list[str] = []
     seeds: list[str] = []
     max_iterations: list[str] = []
+    run_ids: list[str] = []
     for run in runs:
         for token in run.algorithm.split("/"):
             token = token.strip()
@@ -246,11 +242,15 @@ def default_output_dir(runs: Sequence[RunData]) -> Path:
             iter_token = str(int(np.max(finite_iters)))
             if iter_token not in max_iterations:
                 max_iterations.append(iter_token)
+        run_id_token = _extract_run_time_id(run.path).strip()
+        if run_id_token and run_id_token not in run_ids:
+            run_ids.append(run_id_token)
 
     algo_part = _sanitize_token("_".join(algorithms)) if algorithms else "unknown"
     seed_part = _sanitize_token("_".join(seeds)) if seeds else "unknown"
     iter_part = _sanitize_token("_".join(max_iterations)) if max_iterations else "unknown"
-    return PROJECT_DIR / f"plot_{algo_part}_seed_{seed_part}_iteration_{iter_part}"
+    suffix = f"_{_sanitize_token('_'.join(run_ids))}" if run_ids else ""
+    return PROJECT_DIR / f"plot_{algo_part}_seed_{seed_part}_iteration_{iter_part}{suffix}"
 
 
 def default_output_path(runs: Sequence[RunData], default_stem: str) -> Path:
@@ -259,24 +259,26 @@ def default_output_path(runs: Sequence[RunData], default_stem: str) -> Path:
 
 
 def build_arg_parser(description: str) -> argparse.ArgumentParser:
-    """Create a shared CLI argument parser supporting --data-dir <run_dir>."""
+    """Create a shared CLI argument parser supporting --output-dir <run_dir>."""
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
+        "--output-dir",
         "--data-dir",
         "--csv",
-        dest="data_dir",
+        dest="output_dir",
         nargs="+",
         required=True,
-        help="path(s) to run directory(ies) (e.g. run/strongarm/<run_id>) or results.csv file(s)",
+        help="path(s) to run output directory(ies) (e.g. run/strongarm_5ghz/<run_id>) or results.csv file(s)",
     )
     parser.add_argument(
         "-o",
-        "--output",
+        "--save-path",
+        dest="save_path",
         type=Path,
         default=None,
         help=(
-            "output image path "
-            "(default: <ws>/plot_<algorithm>_seed_<seed>_iteration_<iteration>/<plot_name>.png)"
+            "custom output image path "
+            "(default: <ws>/plot_<algorithm>_seed_<seed>_iteration_<iteration>_<run_id>/<plot_name>.png)"
         ),
     )
     parser.add_argument("--title", default=None, help="custom plot title")

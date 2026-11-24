@@ -51,7 +51,8 @@ def plot_power_vs_delay(
     plotted_any = False
     for idx, run in enumerate(runs):
         color = colors[idx % len(colors)]
-        valid = np.isfinite(run.delay_s) & np.isfinite(run.power_w)
+        not_failed = np.array([s.lower() != "failed" for s in run.statuses], dtype=bool)
+        valid = not_failed & np.isfinite(run.delay_s) & np.isfinite(run.power_w)
         if not np.any(valid):
             continue
         plotted_any = True
@@ -134,8 +135,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--log-y", action="store_true", help="use log scale for Power axis")
     args = parser.parse_args(argv)
     plot_power_vs_delay(
-        args.data_dir,
-        output=args.output,
+        args.output_dir,
+        output=args.save_path,
         title=args.title,
         dpi=args.dpi,
         show=args.show,

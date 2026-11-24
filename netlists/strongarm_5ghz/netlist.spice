@@ -35,10 +35,14 @@ VDD vdd 0 1.8
 VCK_pulse ck_pulse 0 PULSE(0 1.8 9.500000e-11 1.000000e-11 1.000000e-11 9.000000e-11 2.000000e-10)
 VCK_dc ck ck_pulse DC 0
 
-* Transient PWL + Differential DC/AC Balun + Configurable Thevenin Source Impedance
-Vinp src_p_tr 0 PWL(0.000000e+00 9.500000e-01 2.490000e-10 9.500000e-01 2.500000e-10 8.500000e-01 6.400000e-09 8.500000e-01)
-Vinn src_n_tr 0 PWL(0.000000e+00 8.500000e-01 2.490000e-10 8.500000e-01 2.500000e-10 9.500000e-01 6.400000e-09 9.500000e-01)
+* PRBS-5 (31-bit LFSR, 32 cycles) Transient Stimulus + Switchable DC/AC Balun
+Vcm vcm_node 0 DC 0.9
+Vprbs prbs_raw 0 PWL(0.000000e+00 1.000000e-01 2.490000e-10 1.000000e-01 2.500000e-10 -1.000000e-01 4.490000e-10 -1.000000e-01 4.500000e-10 -1.000000e-01 6.490000e-10 -1.000000e-01 6.500000e-10 -1.000000e-01 8.490000e-10 -1.000000e-01 8.500000e-10 -1.000000e-01 1.049000e-09 -1.000000e-01 1.050000e-09 1.000000e-01 1.249000e-09 1.000000e-01 1.250000e-09 -1.000000e-01 1.449000e-09 -1.000000e-01 1.450000e-09 -1.000000e-01 1.649000e-09 -1.000000e-01 1.650000e-09 1.000000e-01 1.849000e-09 1.000000e-01 1.850000e-09 -1.000000e-01 2.049000e-09 -1.000000e-01 2.050000e-09 1.000000e-01 2.249000e-09 1.000000e-01 2.250000e-09 1.000000e-01 2.449000e-09 1.000000e-01 2.450000e-09 -1.000000e-01 2.649000e-09 -1.000000e-01 2.650000e-09 -1.000000e-01 2.849000e-09 -1.000000e-01 2.850000e-09 1.000000e-01 3.049000e-09 1.000000e-01 3.050000e-09 1.000000e-01 3.249000e-09 1.000000e-01 3.250000e-09 1.000000e-01 3.449000e-09 1.000000e-01 3.450000e-09 1.000000e-01 3.649000e-09 1.000000e-01 3.650000e-09 1.000000e-01 3.849000e-09 1.000000e-01 3.850000e-09 -1.000000e-01 4.049000e-09 -1.000000e-01 4.050000e-09 -1.000000e-01 4.249000e-09 -1.000000e-01 4.250000e-09 -1.000000e-01 4.449000e-09 -1.000000e-01 4.450000e-09 1.000000e-01 4.649000e-09 1.000000e-01 4.650000e-09 1.000000e-01 4.849000e-09 1.000000e-01 4.850000e-09 -1.000000e-01 5.049000e-09 -1.000000e-01 5.050000e-09 1.000000e-01 5.249000e-09 1.000000e-01 5.250000e-09 1.000000e-01 5.449000e-09 1.000000e-01 5.450000e-09 1.000000e-01 5.649000e-09 1.000000e-01 5.650000e-09 -1.000000e-01 5.849000e-09 -1.000000e-01 5.850000e-09 1.000000e-01 6.049000e-09 1.000000e-01 6.050000e-09 -1.000000e-01 6.249000e-09 -1.000000e-01 6.250000e-09 1.000000e-01 6.400000e-09 1.000000e-01)
+Rprbs_on prbs_raw prbs_in 1e-3 noisy=0
+Rprbs_off prbs_in 0 1e12 noisy=0
 Vid id_in 0 DC 0 AC 1.0
+Einp_prbs src_p_tr vcm_node prbs_in 0 0.5
+Einn_prbs src_n_tr vcm_node prbs_in 0 -0.5
 Einp src_p src_p_tr id_in 0 0.5
 Einn src_n src_n_tr id_in 0 -0.5
 Rinp src_p inp 1e-3 noisy=0
@@ -84,13 +88,20 @@ meas tran p_avg AVG p_inst FROM=2n TO=6.4n
 meas tran p_peak MAX p_inst FROM=2n TO=6.4n
 meas tran e_total INTEG p_inst FROM=2n TO=6.4n
 wrdata transient.txt v(X) v(Y) v(ck) v(inp) v(inn) vdiff i(VDD) p_inst
+let vdiff_abs_chk = abs(vdiff)
+meas tran early_cyc0_diff MAX vdiff_abs_chk FROM=0.1n TO=0.2n
+if early_cyc0_diff < 0.9
+  quit 0
+end
 
 * =====================================================
 * 2. TRANSIENT KICKBACK NOISE (Rs = 500 ohm, |Vin_diff| = 10 mV, 6 cycles @ 5 GHz)
 * =====================================================
+alter rprbs_on = 1e12
+alter rprbs_off = 1e-3
 alter rinp = 500
 alter rinn = 500
-alter vid = 0.09
+alter vid = 0.01
 tran 3.333333e-13 1.200000e-09
 set pl_kb = $curplot
 let vkb_diff = (v(inp) - v(inn)) - (v(src_p) - v(src_n))
@@ -104,7 +115,7 @@ wrdata kickback.txt v(inp) v(inn) v(src_p) v(src_n) v(ck) vkb_diff
 * =====================================================
 alter rinp = 1e-3
 alter rinn = 1e-3
-alter vid = -0.1
+alter vid = 0.0
 alter vck_dc = 1.8
 alter rchoke_x = 1e-3
 alter rchoke_y = 1e-3

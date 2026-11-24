@@ -94,8 +94,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     plot_feasibility_rate(
-        args.data_dir,
-        output=args.output,
+        args.output_dir,
+        output=args.save_path,
         title=args.title,
         dpi=args.dpi,
         show=args.show,

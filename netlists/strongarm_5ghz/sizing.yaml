@@ -5,13 +5,13 @@ optimization:
   variables: [w_in, l_in, w_n, w_p, w_rst, w_tail, w_8, l_8]
   derived_features: [w_over_l, w_times_l]
   bounds:
-    w_in: {min: 0.5, max: 40.0, scale: log}
-    l_in: {min: 0.15, max: 0.6, scale: log}
-    w_n: {min: 0.5, max: 40.0, scale: log}
-    w_p: {min: 0.5, max: 60.0, scale: log}
-    w_rst: {min: 0.5, max: 40.0, scale: log}
-    w_tail: {min: 0.5, max: 60.0, scale: log}
-    w_8: {min: 0.5, max: 40.0, scale: log}
+    w_in: {min: 6.0, max: 40.0, scale: log}
+    l_in: {min: 0.15, max: 0.35, scale: log}
+    w_n: {min: 0.5, max: 8.0, scale: log}
+    w_p: {min: 0.5, max: 8.0, scale: log}
+    w_rst: {min: 2.5, max: 25.0, scale: log}
+    w_tail: {min: 8.0, max: 60.0, scale: log}
+    w_8: {min: 0.5, max: 8.0, scale: log}
     l_8: {min: 0.15, max: 1.0, scale: log}
 
 parameters:

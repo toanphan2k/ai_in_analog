@@ -42,14 +42,15 @@ def plot_objective_score(
     for idx, run in enumerate(runs):
         color = colors[idx % len(colors)]
         finite = np.isfinite(run.objective_score)
+        not_failed = np.array([s.lower() != "failed" for s in run.statuses], dtype=bool)
         if include_failed:
             mask = finite
             point_kind = "all evaluations"
         else:
-            mask = finite & run.feasible & (run.objective_score < SENTINEL_SCORE)
+            mask = finite & run.feasible & not_failed
             point_kind = "feasible evaluations"
             if not np.any(mask):
-                mask = finite & (run.objective_score < SENTINEL_SCORE)
+                mask = finite & not_failed & (run.objective_score < SENTINEL_SCORE)
                 point_kind = "evaluations (none feasible)"
 
         if not np.any(mask):
@@ -108,8 +109,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     plot_objective_score(
-        args.data_dir,
-        output=args.output,
+        args.output_dir,
+        output=args.save_path,
         title=args.title,
         dpi=args.dpi,
         show=args.show,

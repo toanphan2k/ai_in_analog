@@ -21,21 +21,23 @@ from plot.plot_transient_waveforms import plot_transient_waveforms
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--output-dir",
         "--data-dir",
         "--csv",
-        dest="data_dir",
+        dest="output_dir",
         nargs="+",
         required=True,
-        help="path(s) to run directory(ies) (e.g. run/strongarm/<run_id>) or results.csv file(s)",
+        help="path(s) to run output directory(ies) (e.g. run/strongarm_5ghz/<run_id>) or results.csv file(s)",
     )
     parser.add_argument(
         "-o",
-        "--output-dir",
+        "--plot-dir",
+        dest="plot_dir",
         type=Path,
         default=None,
         help=(
             "directory for output PNGs "
-            "(default: <ws>/plot_<algorithm>_seed_<seed>_iteration_<iteration>/)"
+            "(default: <ws>/plot_<algorithm>_seed_<seed>_iteration_<iteration>_<run_id>/)"
         ),
     )
     parser.add_argument(
@@ -54,17 +56,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     def _out(stem: str) -> Path | None:
-        return (args.output_dir / f"{stem}.png") if args.output_dir is not None else None
+        return (args.plot_dir / f"{stem}.png") if args.plot_dir is not None else None
 
-    plot_objective_score(args.data_dir, output=_out(OBJ_STEM), dpi=args.dpi, show=args.show)
-    plot_feasibility_rate(args.data_dir, output=_out(FEAS_STEM), dpi=args.dpi, show=args.show)
-    plot_power_vs_delay(args.data_dir, output=_out(PWR_STEM), dpi=args.dpi, show=args.show)
-    plot_offset_vs_noise(args.data_dir, output=_out(OFF_STEM), dpi=args.dpi, show=args.show)
-    plot_kickback_vs_noise(args.data_dir, output=_out(KB_STEM), dpi=args.dpi, show=args.show)
+    plot_objective_score(args.output_dir, output=_out(OBJ_STEM), dpi=args.dpi, show=args.show)
+    plot_feasibility_rate(args.output_dir, output=_out(FEAS_STEM), dpi=args.dpi, show=args.show)
+    plot_power_vs_delay(args.output_dir, output=_out(PWR_STEM), dpi=args.dpi, show=args.show)
+    plot_offset_vs_noise(args.output_dir, output=_out(OFF_STEM), dpi=args.dpi, show=args.show)
+    plot_kickback_vs_noise(args.output_dir, output=_out(KB_STEM), dpi=args.dpi, show=args.show)
     if not args.skip_transient and args.top_k > 0:
         saved = plot_transient_waveforms(
-            args.data_dir,
-            output_dir=args.output_dir,
+            args.output_dir,
+            output_dir=args.plot_dir,
             top_k=args.top_k,
             dpi=args.dpi,
             show=args.show,

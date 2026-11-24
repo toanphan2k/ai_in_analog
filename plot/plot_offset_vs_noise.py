@@ -41,8 +41,12 @@ def plot_offset_vs_noise(
     fig, ax = plt.subplots(figsize=(8.5, 5.2))
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
-    all_noise = np.concatenate([r.noise_v for r in runs])
-    all_offset = np.concatenate([np.abs(r.offset_v) for r in runs])
+    all_noise = np.concatenate(
+        [r.noise_v[[s.lower() != "failed" for s in r.statuses]] for r in runs]
+    )
+    all_offset = np.concatenate(
+        [np.abs(r.offset_v[[s.lower() != "failed" for s in r.statuses]]) for r in runs]
+    )
     noise_scale, noise_unit = select_unit(all_noise, VOLTAGE_UNITS)
     offset_scale, offset_unit = select_unit(all_offset, VOLTAGE_UNITS)
 
@@ -50,8 +54,9 @@ def plot_offset_vs_noise(
     plotted_any = False
     for idx, run in enumerate(runs):
         color = colors[idx % len(colors)]
+        not_failed = np.array([s.lower() != "failed" for s in run.statuses], dtype=bool)
         offset_abs = np.abs(run.offset_v)
-        valid = np.isfinite(run.noise_v) & np.isfinite(offset_abs)
+        valid = not_failed & np.isfinite(run.noise_v) & np.isfinite(offset_abs)
         if not np.any(valid):
             continue
         plotted_any = True
@@ -134,8 +139,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--log-y", action="store_true", help="use log scale for Offset axis")
     args = parser.parse_args(argv)
     plot_offset_vs_noise(
-        args.data_dir,
-        output=args.output,
+        args.output_dir,
+        output=args.save_path,
         title=args.title,
         dpi=args.dpi,
         show=args.show,

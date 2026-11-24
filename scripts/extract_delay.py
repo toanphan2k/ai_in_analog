@@ -1,4 +1,4 @@
-"""Extract worst-case transient decision delay from an ngspice wrdata file."""
+"""Extract worst-case transient decision delay, rail levels, and graded failure diagnostics."""
 from __future__ import annotations
 
 import argparse
@@ -10,6 +10,42 @@ import numpy as np
 
 from scripts._common import write_json
 from scripts.waveform_io import load_transient
+
+
+class TransientFailureError(ValueError):
+    """Transient comparator check failure carrying progress metrics for graded RL penalties."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        cycles_completed: int,
+        total_cycles: int,
+        peak_diff_v: float,
+        decision_threshold_v: float,
+        reset_min_v: float | None = None,
+        reset_threshold_v: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.cycles_completed = int(cycles_completed)
+        self.total_cycles = int(max(total_cycles, 1))
+        self.peak_diff_v = float(max(0.0, peak_diff_v))
+        self.decision_threshold_v = float(decision_threshold_v)
+        self.reset_min_v = None if reset_min_v is None else float(reset_min_v)
+        self.reset_threshold_v = None if reset_threshold_v is None else float(reset_threshold_v)
+
+    def as_dict(self) -> dict[str, float | int | str | None]:
+        return {
+            "reason": self.reason,
+            "cycles_completed": self.cycles_completed,
+            "total_cycles": self.total_cycles,
+            "peak_diff_v": self.peak_diff_v,
+            "decision_threshold_v": self.decision_threshold_v,
+            "reset_min_v": self.reset_min_v,
+            "reset_threshold_v": self.reset_threshold_v,
+        }
 
 
 def _read_waveform(path: str | Path):
@@ -42,9 +78,7 @@ def _falling_crossings(time, signal, threshold: float):
 
 
 def _rising_crossing(t, values, threshold: float, start: float, stop: float):
-    indices = np.flatnonzero(
-        (values[:-1] < threshold) & (values[1:] >= threshold)
-    )
+    indices = np.flatnonzero((values[:-1] < threshold) & (values[1:] >= threshold))
     for i in indices:
         fraction = (threshold - values[i]) / (values[i + 1] - values[i])
         crossing = float(t[i] + fraction * (t[i + 1] - t[i]))
@@ -70,17 +104,7 @@ def extract_delay(
     inverting: bool = True,
     check_polarity: bool = True,
 ) -> dict:
-    """Extract worst-case evaluation delay, reset time, and optional average power.
-
-    Enforces full-cycle StrongARM operation across every clock cycle:
-    - outputs must be precharged above ``reset_threshold_ratio * vdd`` before each rising edge;
-    - differential output ``|X - Y|`` must cross ``vdd / 2`` within half a clock period on every
-      cycle (no stuck/partial-cycle latches);
-    - when input vectors are present and ``check_polarity`` is True, final output polarity at the
-      end of each evaluation phase must match the input differential sign;
-    - during every complete reset half-cycle, ``min(X, Y)`` must recover above
-      ``reset_threshold_ratio * vdd`` within half a clock period.
-    """
+    """Extract worst-case evaluation delay, reset time, VOH/VOL/overshoot, and average power."""
     if vdd <= 0 or period_s <= 0:
         raise ValueError("vdd and period_s must be positive")
     if not 0.5 < reset_threshold_ratio < 1.0:
@@ -102,6 +126,7 @@ def extract_delay(
     if not edges:
         raise ValueError(f"clock has no rising crossing at {decision_threshold:.3f} V")
     falling_edges = _falling_crossings(time, clock, decision_threshold)
+    total_cycles = len(edges)
 
     inp_vec = None
     inn_vec = None
@@ -115,18 +140,33 @@ def extract_delay(
     vdiff_signed = x - y
     vdiff_abs = np.abs(vdiff_signed)
     min_output = np.minimum(x, y)
+    max_output = np.maximum(x, y)
 
     delays: list[float] = []
     cycle_swings: list[float] = []
+    cycle_voh: list[float] = []
+    cycle_vol: list[float] = []
+    cycle_overshoots: list[float] = []
+
     for cycle_idx, edge in enumerate(edges):
         window_stop = min(float(edge + period_s / 2.0), float(time[-1]))
         x_edge = float(np.interp(edge, time, x))
         y_edge = float(np.interp(edge, time, y))
+        in_window = (time >= edge) & (time <= window_stop)
+        peak_diff = float(np.max(vdiff_abs[in_window])) if np.any(in_window) else 0.0
+
         if min(x_edge, y_edge) < reset_threshold or abs(x_edge - y_edge) >= decision_threshold:
-            raise ValueError(
+            raise TransientFailureError(
                 f"comparator outputs not reset before cycle {cycle_idx} at t={edge:.3e} s "
                 f"(X={x_edge:.3f} V, Y={y_edge:.3f} V; required min >= {reset_threshold:.3f} V "
-                f"and |X-Y| < {decision_threshold:.3f} V)"
+                f"and |X-Y| < {decision_threshold:.3f} V)",
+                reason="not_precharged",
+                cycles_completed=cycle_idx,
+                total_cycles=total_cycles,
+                peak_diff_v=peak_diff,
+                decision_threshold_v=decision_threshold,
+                reset_min_v=min(x_edge, y_edge),
+                reset_threshold_v=reset_threshold,
             )
 
         crossing = _rising_crossing(
@@ -137,18 +177,30 @@ def extract_delay(
             window_stop,
         )
         if crossing is None:
-            in_window = (time >= edge) & (time <= window_stop)
-            peak_diff = float(np.max(vdiff_abs[in_window])) if np.any(in_window) else 0.0
-            raise ValueError(
+            raise TransientFailureError(
                 f"no differential decision crossing |X-Y| >= {decision_threshold:.3f} V in cycle "
                 f"{cycle_idx} within half a clock period after t={edge:.3e} s "
-                f"(max |X-Y| was {peak_diff:.3f} V)"
+                f"(max |X-Y| was {peak_diff:.3f} V)",
+                reason="no_decision",
+                cycles_completed=cycle_idx,
+                total_cycles=total_cycles,
+                peak_diff_v=peak_diff,
+                decision_threshold_v=decision_threshold,
             )
         delays.append(crossing - edge)
 
-        in_window = (time >= edge) & (time <= window_stop)
         if np.any(in_window):
-            cycle_swings.append(float(np.max(vdiff_abs[in_window])))
+            cycle_swings.append(peak_diff)
+
+        t_sample = min(float(edge + 0.48 * period_s), window_stop)
+        xs = float(np.interp(t_sample, time, x))
+        ys = float(np.interp(t_sample, time, y))
+        cycle_voh.append(max(xs, ys))
+        cycle_vol.append(min(xs, ys))
+
+        full_cycle = (time >= edge) & (time <= min(float(edge + period_s), float(time[-1])))
+        if np.any(full_cycle):
+            cycle_overshoots.append(max(0.0, float(np.max(max_output[full_cycle])) - vdd))
 
         if inp_vec is not None and inn_vec is not None:
             vin_diff = float(np.interp(edge, time, inp_vec) - np.interp(edge, time, inn_vec))
@@ -156,9 +208,14 @@ def extract_delay(
                 vout_end = float(np.interp(window_stop, time, vdiff_signed))
                 expected_sign = -1.0 if ((vin_diff > 0.0) == inverting) else 1.0
                 if expected_sign * vout_end < decision_threshold:
-                    raise ValueError(
+                    raise TransientFailureError(
                         f"wrong decision polarity in cycle {cycle_idx} at t={edge:.3e} s "
-                        f"(Vin_diff={vin_diff:+.3e} V, end-of-eval X-Y={vout_end:+.3f} V)"
+                        f"(Vin_diff={vin_diff:+.3e} V, end-of-eval X-Y={vout_end:+.3f} V)",
+                        reason="wrong_polarity",
+                        cycles_completed=cycle_idx,
+                        total_cycles=total_cycles,
+                        peak_diff_v=max(0.0, expected_sign * vout_end),
+                        decision_threshold_v=decision_threshold,
                     )
 
     reset_times: list[float] = []
@@ -168,7 +225,11 @@ def extract_delay(
             continue
         min_at_fall = float(np.interp(fall_edge, time, min_output))
         in_reset = (time >= fall_edge) & (time <= reset_stop)
-        if min_at_fall >= reset_threshold and np.any(in_reset) and float(np.min(min_output[in_reset])) >= reset_threshold:
+        if (
+            min_at_fall >= reset_threshold
+            and np.any(in_reset)
+            and float(np.min(min_output[in_reset])) >= reset_threshold
+        ):
             reset_times.append(0.0)
             continue
         rst_crossing = _rising_crossing(
@@ -180,10 +241,17 @@ def extract_delay(
         )
         if rst_crossing is None:
             peak_rst = float(np.max(min_output[in_reset])) if np.any(in_reset) else min_at_fall
-            raise ValueError(
+            raise TransientFailureError(
                 f"comparator failed to reset min(X,Y) >= {reset_threshold:.3f} V after cycle "
                 f"{cycle_idx} falling edge at t={fall_edge:.3e} s "
-                f"(highest observed min(X,Y) was {peak_rst:.3f} V)"
+                f"(highest observed min(X,Y) was {peak_rst:.3f} V)",
+                reason="reset_failed",
+                cycles_completed=cycle_idx,
+                total_cycles=total_cycles,
+                peak_diff_v=decision_threshold,
+                decision_threshold_v=decision_threshold,
+                reset_min_v=peak_rst,
+                reset_threshold_v=reset_threshold,
             )
         reset_times.append(rst_crossing - fall_edge)
 
@@ -193,6 +261,9 @@ def extract_delay(
         "delay_mean_s": float(np.mean(delays)),
         "cycles_measured": len(delays),
         "output_swing_v": float(min(cycle_swings)) if cycle_swings else float(np.max(vdiff_abs)),
+        "voh_v": float(min(cycle_voh)) if cycle_voh else float("nan"),
+        "vol_v": float(max(cycle_vol)) if cycle_vol else float("nan"),
+        "overshoot_v": float(max(cycle_overshoots)) if cycle_overshoots else 0.0,
     }
     if reset_times:
         reset_max = float(max(reset_times))
