@@ -3,15 +3,15 @@ scoring:
   infeasible_score: 1000.0
 
 weights:
-  delay: 3
+  delay: 4.0
   power: 0.5
   energy: 0.5
   offset: 1.0
   noise: 0.5
-  kickback: 1.0
+  kickback: 0.8
 
 references:
-  delay_s: 6.0e-11
+  delay_s: 4.8e-11
   power_w: 1.25e-3
   energy_j: 2.5e-13
   offset_v: 5.0e-3
@@ -19,8 +19,9 @@ references:
   kickback_v: 2.0e-2
 
 constraints:
-  max_delay_s: 6.0e-11
-  max_reset_time_s: 6.0e-11
+  max_delay_s: 4.8e-11
+  max_reset_time_s: 5.5e-11
+  max_vol_v: 0.008
   max_power_w: 1.25e-3
   max_offset_v: 1.0e-2
   max_noise_v: 1.0e-3

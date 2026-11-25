@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shlex
+import sys
 import time
 from typing import Sequence
 
@@ -78,6 +80,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         force=True,
     )
     started = time.perf_counter()
+    cli_args = list(argv) if argv is not None else sys.argv[1:]
+    full_command = shlex.join(["python3", "optimize_sizing.py", *cli_args])
     run_dir = run_rl_sizing(
         netlist=args.netlist,
         runner_name=args.runner,
@@ -93,6 +97,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         resume=args.resume,
         timeout_s=args.timeout_s,
         keep=args.keep,
+        command=full_command,
         verbose=args.verbose,
     )
     print(f"Results: {run_dir}")

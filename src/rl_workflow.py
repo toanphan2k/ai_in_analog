@@ -6,12 +6,14 @@ import json
 import logging
 import math
 import re
+import shlex
 import shutil
+import socket
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1066,6 +1068,7 @@ def run_rl_sizing(
     workers: int = 1,
     resume: str | None = None,
     keep: int | None = None,
+    command: str | None = None,
     verbose: int = 0,
 ) -> Path:
     """Run PPO/SAC-controlled NRBO with weighted measured scores."""
@@ -1145,6 +1148,49 @@ def run_rl_sizing(
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "data").mkdir(parents=True, exist_ok=True)
 
+    tz_utc7 = timezone(timedelta(hours=7))
+    start_dt = datetime.now(tz_utc7)
+    try:
+        hostname = subprocess.run(
+            ["hostname"], capture_output=True, text=True, check=True, timeout=5
+        ).stdout.strip() or socket.gethostname()
+    except (OSError, subprocess.SubprocessError):
+        hostname = socket.gethostname()
+    try:
+        executer = subprocess.run(
+            ["whoami"], capture_output=True, text=True, check=True, timeout=5
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        executer = ""
+
+    def _format_duration(seconds: float) -> str:
+        total_sec = max(0, int(round(seconds)))
+        hours, rem = divmod(total_sec, 3600)
+        minutes, secs = divmod(rem, 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    full_command = command if command is not None else shlex.join(["python3", *sys.argv])
+
+    def _write_run_info(end_dt: datetime | None = None) -> None:
+        info = {
+            "command": full_command,
+            "population": int(population_size),
+            "total_samples": len(all_samples),
+            "episode": int(episode_length),
+            "rl_steps": int(timesteps),
+            "cpus_in_use": int(min(workers, population_size)),
+            "start_time": start_dt.strftime("%H:%M:%S UTC+7"),
+            "end_time": end_dt.strftime("%H:%M:%S UTC+7") if end_dt is not None else None,
+            "total_time": _format_duration((end_dt - start_dt).total_seconds()) if end_dt is not None else None,
+            "seed": int(seed),
+            "algorithm": f"{algorithm}+NRBO",
+            "runner": runner_name,
+            "netlist_template": str(template_path),
+            "executer": executer,
+            "hostname": hostname,
+        }
+        _atomic_json(run_dir / "run_info.json", info)
+
     if verbose >= 2:
         print(f"Resolved score: {resolved}", file=sys.stderr)
         print(f"Score config: {score_path}", file=sys.stderr)
@@ -1153,6 +1199,7 @@ def run_rl_sizing(
     records_by_name: dict[str, dict[str, Any]] = {
         str(s["name"]): s for s in all_samples if s.get("name")
     }
+    _write_run_info()
 
     if verbose >= 1:
         keep_label = "all" if keep is None else str(keep)
@@ -1392,6 +1439,7 @@ def run_rl_sizing(
         algorithm=algorithm,
         seed=seed,
     )
+    _write_run_info(datetime.now(tz_utc7))
     if verbose >= 1:
         print(
             f"Completed {run_id}: {len(all_samples)} measured evaluations, "
