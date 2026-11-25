@@ -1,6 +1,7 @@
-"""Readers for ngspice transient and AC ``wrdata`` output files."""
+"""Readers for ngspice transient, AC, noise-spectrum, and scalar metric files."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -45,7 +46,11 @@ def load_transient(path: str | Path, default_names: tuple[str, ...] = ()) -> dic
 def parse_ac(path: str | Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Parse ngspice AC wrdata real/imaginary column pairs."""
     path = Path(path)
-    lines = [line.split() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    lines = [
+        line.split()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     if len(lines) < 2:
         raise ValueError(f"empty AC waveform file: {path}")
 
@@ -65,3 +70,42 @@ def parse_ac(path: str | Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         imag = data[:, 2 + 2 * index]
         vectors[name] = real + 1j * imag
     return data[:, 0], vectors
+
+
+def load_noise_spectrum(path: str | Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Load frequency plus real noise spectral density vectors from ngspice wrdata."""
+    path = Path(path)
+    with path.open(encoding="utf-8") as fh:
+        first = fh.readline().strip()
+    if not first:
+        raise ValueError(f"empty noise waveform file: {path}")
+
+    fields = first.split()
+    header = fields[1:] if fields[0].startswith("#") else fields
+    data = np.loadtxt(path, comments="#", skiprows=1, ndmin=2)
+    if data.size == 0:
+        raise ValueError(f"empty noise waveform file: {path}")
+    names = [name.lower() for name in header]
+    if len(names) != data.shape[1] or names[0] not in {"frequency", "freq", "f"}:
+        raise ValueError("noise wrdata must have frequency first followed by spectrum columns")
+    return data[:, 0], {name: data[:, index] for index, name in enumerate(names[1:], start=1)}
+
+
+def load_scalar_metrics(path: str | Path) -> dict[str, float]:
+    """Parse space- or equals-separated scalar key/value lines written by ngspice."""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"scalar metrics file does not exist: {path}")
+    metrics: dict[str, float] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("*", "#")):
+            continue
+        cleaned = line.replace("=", " ")
+        parts = cleaned.split()
+        if len(parts) < 2:
+            continue
+        value = float(parts[1])
+        if math.isfinite(value):
+            metrics[parts[0].strip()] = value
+    return metrics

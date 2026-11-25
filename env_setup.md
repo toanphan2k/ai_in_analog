@@ -47,7 +47,7 @@ command -v magic
 
 Open PDKs downloads the SKY130 source repositories during configuration/build. The
 following creates only the `sky130A` variant and installs to the default
-`/usr/local/share/pdk` path expected by this project's `netlists/strongarm/netlist.spice`.
+`/usr/local/share/pdk` path expected by this project's `netlists/strongarm_2ghz/netlist.spice`.
 
 ```bash
 cd ~/src
@@ -74,7 +74,7 @@ test -r "$PDK_ROOT/sky130A/libs.tech/ngspice/sky130.lib.spice" && \
 ```
 
 If you install Open PDKs with a non-default prefix, update the `.lib` path in
-`netlists/strongarm/netlist.spice` as well; SPICE does not expand `PDK_ROOT` inside that
+`netlists/strongarm_2ghz/netlist.spice` as well; SPICE does not expand `PDK_ROOT` inside that
 absolute path.
 
 ## 4. Set Up the Project Python Environment
@@ -87,9 +87,9 @@ bash setup_env.sh
 source .venv/bin/activate
 ```
 
-The setup script installs Python requirements, including scikit-learn, LightGBM, and
-CatBoost. If your organization provides a pip mirror, pass its pip-compatible simple
-index URL, for example:
+The setup script installs Python requirements, including Stable-Baselines3, Gymnasium,
+and PyTorch for PPO/SAC. If your organization provides a pip mirror, pass its
+pip-compatible simple index URL, for example:
 
 ```bash
 PIP_INDEX_URL=https://<artifactory-host>/artifactory/api/pypi/<repository>/simple \
@@ -110,11 +110,15 @@ Then run a small real simulation from the repository root:
 ```bash
 python3 optimize_sizing.py \
   --runner ngspice \
-  --netlist netlists/strongarm/ \
-  --samples 1 \
-  --algorithm halton \
+  --netlist netlists/strongarm_2ghz/ \
+  --algorithm PPO \
+  --samples 2 \
+  --population-size 4 \
+  --rl-timesteps 64 \
+  --episode-length 4 \
   --seed 0
 ```
 
-To exercise collection without ngspice, use `--runner mock`; those metrics are synthetic
-and do not validate the PDK or simulator installation.
+For off-policy SAC, replace `--algorithm PPO` with `--algorithm SAC`. To exercise the
+pipeline without ngspice, use `--runner mock`; those metrics are synthetic and do not
+validate the PDK or simulator installation.

@@ -59,7 +59,7 @@ def extract_gain(
         "peak_gain_v_per_v": float(gain.max()),
         "peak_gain_frequency_hz": float(frequency[int(np.argmax(gain))]),
         "bandwidth_3db_hz": bandwidth,
-        "samples": int(len(frequency)),
+        "ac_freq_points": int(len(frequency)),
     }
 
 

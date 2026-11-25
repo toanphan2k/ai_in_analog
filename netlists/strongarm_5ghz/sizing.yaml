@@ -5,13 +5,13 @@ optimization:
   variables: [w_in, l_in, w_n, w_p, w_rst, w_tail, w_8, l_8]
   derived_features: [w_over_l, w_times_l]
   bounds:
-    w_in: {min: 0.5, max: 40.0, scale: log}
-    l_in: {min: 0.15, max: 0.6, scale: log}
-    w_n: {min: 0.5, max: 40.0, scale: log}
-    w_p: {min: 0.5, max: 60.0, scale: log}
-    w_rst: {min: 0.5, max: 40.0, scale: log}
-    w_tail: {min: 0.5, max: 60.0, scale: log}
-    w_8: {min: 0.5, max: 40.0, scale: log}
+    w_in: {min: 6.0, max: 40.0, scale: log}
+    l_in: {min: 0.15, max: 0.35, scale: log}
+    w_n: {min: 0.5, max: 8.0, scale: log}
+    w_p: {min: 0.5, max: 8.0, scale: log}
+    w_rst: {min: 2.5, max: 25.0, scale: log}
+    w_tail: {min: 8.0, max: 60.0, scale: log}
+    w_8: {min: 0.5, max: 8.0, scale: log}
     l_8: {min: 0.15, max: 1.0, scale: log}
 
 parameters:
@@ -55,29 +55,40 @@ groups:
 
 analyses:
   transient:
+    enabled: true
+    waveform: "transient.txt"
     vdd_v: 1.8
-    period_s: 5.0e-10
-    power_window_s: [5.0e-9, 1.6e-8]
+    period_s: 2.0e-10
+    power_window_s: [2.0e-9, 6.4e-9]
     output_positive: "v(X)"
     output_negative: "v(Y)"
     clock_vector: "v(ck)"
+    input_positive: "v(inp)"
+    input_negative: "v(inn)"
     power_vector: "p_inst"
+    reset_threshold_ratio: 0.9
+    inverting: true
+    check_polarity: true
   gain:
     enabled: true
-    source_overrides:
-      VCK: "VCK ck 0 1.8"
-      Vinp: "Vinp inp 0 DC 0.9 AC 0.5"
-      Vinn: "Vinn inn 0 DC 0.9 AC -0.5"
-    extra_devices:
-      - "LX X vdd 1e6"
-      - "LY Y vdd 1e6"
-    control:
-      - "set wr_singlescale"
-      - "set wr_vecnames"
-      - "op"
-      - "ac dec 25 1 1e11"
-    vectors: ["v(X)", "v(Y)", "v(inp)", "v(inn)"]
+    waveform: "ac.txt"
     output_positive: "v(X)"
     output_negative: "v(Y)"
     input_positive: "v(inp)"
     input_negative: "v(inn)"
+  offset:
+    enabled: true
+    metrics_file: "metrics.txt"
+    key: "input_referred_offset_v"
+  noise:
+    enabled: true
+    waveform: "noise.txt"
+    metrics_file: "metrics.txt"
+    output_spectrum: "onoise_spectrum"
+    input_spectrum: "inoise_spectrum"
+  kickback:
+    enabled: true
+    waveform: "kickback.txt"
+    metrics_file: "metrics.txt"
+    window_s: [4.0e-10, 1.2e-9]
+    differential_vector: "vkb_diff"

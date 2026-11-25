@@ -1,191 +1,318 @@
-# AI-assisted sizing
+# RL-Controlled Analog Sizing
 
-The project separates design-space/AI logic from simulator and netlist helpers:
+This branch runs reinforcement learning controllers over a fixed NRBO metaheuristic. PPO or
+SAC selects the NRBO restart rate, Newton/population-move balance, and step radius during
+search. Every candidate is evaluated directly by the selected simulator; no supervised
+surrogate model or pre-collected dataset is used.
 
 ```text
 ai_in_analog/
-  netlists/<design>/   netlist.spice and sizing.yaml
-  src/                 design features, candidate selection, and NRBO search logic
-  scripts/             parameter parsing, deck generation, and metric extraction
-  runner/              simulator adapters
-  collect_data.py     space-filling SPICE dataset collection
-  train_surrogate.py  surrogate model training and evaluation
-  optimize_sizing.py  generic sizing and evaluation entry point
-  run/<design>/<run-id>/ generated decks, simulator output, CSV, and JSON
-  dataset/<design>/     collected CSV or Parquet datasets
+  optimize_sizing.py       PPO/SAC + NRBO entry point
+  netlists/<design>/       netlist.spice and sizing.yaml
+  src/rl_nrbo.py           direct-feedback RL controller and NRBO population search
+  src/rl_workflow.py       simulator evaluation, objective/reward, and run artifacts
+  runner/                  ngspice and mock runners
+  scripts/                 SPICE deck generation and metric extraction
+  plot/                    standalone and batch plotting scripts for results.csv
+  run/<design>/<run-id>/   policy, candidates, and measured sample records
 ```
 
-Each design folder supplies sizing variables, physical bounds and scale, transistor groups,
-SPICE `.param` mapping, derived geometry features, and enabled analyses in `sizing.yaml`.
-Symmetric devices are represented by one group-level W/L pair. Dataset feature engineering
-adds each group's W/L and W*L while retaining the physical sizing variables.
+## Setup
 
-## Setup and run
+Install ngspice and the configured SKY130A PDK using [env_setup.md](env_setup.md). Then
+create the Python environment from the repository root:
 
 ```bash
 bash setup_env.sh
 source .venv/bin/activate
-python3 optimize_sizing.py \
-  --runner ngspice \
-  --netlist netlists/strongarm/ \
-  --samples 10 \
-  --algorithm halton \
-  --seed 0
 ```
 
-## Code Quality
+`requirements.txt` contains the RL and simulator-pipeline dependencies, including
+Stable-Baselines3, Gymnasium, and PyTorch. The PDK and ngspice are system tools and are not
+installed by pip.
 
-Install the development linters into the project environment and run them across all
-Python entry points and packages:
-
-```bash
-python3 -m pip install -r requirements-dev.txt
-flake8 collect_data.py optimize_sizing.py train_surrogate.py src runner scripts
-pylint collect_data.py optimize_sizing.py train_surrogate.py src runner scripts --score=n
-```
-
-Flake8 and Pylint use the repository `.flake8` and `.pylintrc` settings. In VS Code,
-select `.venv/bin/python` on Linux/WSL or `.venv\Scripts\python.exe` on Windows for
-Pylance so optional and runtime imports resolve against the project environment.
-
-## Collect and train
-
-Collect a space-filling dataset by running the same configured SPICE analyses used by
-`optimize_sizing.py`. `lhs` is the default; `sobol`, `halton`, and `random` are also
-available. Collection writes both the normal run folder and a flattened dataset:
-
-```bash
-python3 collect_data.py \
-  --runner ngspice \
-  --netlist netlists/strongarm/ \
-  --samples 100 \
-  --algorithm lhs \
-  --seed 0
-```
-
-By default, the dataset is written to `dataset/<netlist-name>/data.csv` (for example,
-`dataset/strongarm/data.csv`). The generic `--output dataset/data.csv` path is treated as
-the same design-scoped default; other explicit output paths are used as provided.
-
-Use a `.parquet` output path for Parquet export; this requires optional `pandas` and
-`pyarrow` packages. Failed and partial simulations are retained with their status and
-available measurements. Sizing columns are named `size__<variable>` and measured targets
-retain the metric names from the run results.
-
-For a pipeline smoke test on a machine without ngspice, choose the deterministic mock
-runner. Its measurements are synthetic and are not suitable for circuit design decisions:
-
-```bash
-python3 collect_data.py \
-  --runner mock \
-  --netlist netlists/strongarm/ \
-  --samples 40 \
-  --algorithm lhs \
-  --seed 23 \
-  --mock-failure-rate 0.05 \
-  --output dataset/strongarm/mock_data.csv
-```
-
-Train on the collected dataset and save a model plus a held-out evaluation report:
-
-```bash
-python3 train_surrogate.py \
-  --dataset dataset/strongarm/data.csv \
-  --method gpr \
-  --targets delay_s,speed_hz,power_w \
-  --output model.pkl \
-  --target-transform log-standard
-```
-
-Training supports `gpr` (Gaussian Process with Matérn 5/2 ARD), `lightgbm`, `catboost`,
-`mlp`, and `two-stage` (validity classifier followed by regression). LightGBM and CatBoost
-are included in `requirements.txt`. Targets default to standardized
-log-space; use `--target-transform standard` or `none` when appropriate. Failed samples
-are excluded from regression by default and remain labeled for two-stage classification;
-`--include-partial` opts partial results into regression. The model is serialized with
-joblib. `<model>_evaluation.json` reports held-out MAE, R2, MAPE, and feature importance
-(GPR ARD relevance and permutation importance). Only use model files from trusted sources
-when loading serialized artifacts.
-
-## Surrogate optimization
-
-`optimize_sizing.py --algorithm nrbo` loads a trained artifact and searches the configured
-sizing bounds using a finite-difference Newton-Raphson population search with randomized
-escape moves. It minimizes normalized weighted delay, speed, and power objectives; defaults
-minimize delay only. `speed_hz` is derived as `1 / delay_s` during collection, and a positive
-speed weight maximizes predicted speed. An explicit `--objective` selects one model target;
-use `--maximize-objective` for targets where larger is better. An optional predicted power
-limit adds a constraint penalty. With a two-stage model, `--min-valid-probability` sets the
-required predicted validity. In one invocation, NRBO loads the model, proposes candidates,
-and evaluates them using the selected runner. It saves surrogate proposals and measured
-results under `run/<design>/<run-id>/`.
+## Run PPO + NRBO
 
 ```bash
 python3 optimize_sizing.py \
   --runner ngspice \
-  --netlist netlists/strongarm/ \
+  --netlist netlists/strongarm_2ghz/ \
+  --algorithm PPO \
   --samples 5 \
-  --algorithm nrbo \
-  --model model.pkl \
-  --delay-weight 0.0 \
-  --speed-weight 1.0 \
-  --power-weight 0.25 \
-  --max-power-w 0.02 \
-  --min-valid-probability 0.8 \
+  --population-size 4 \
+  --workers 1 \
+  --rl-timesteps 64 \
+  --episode-length 8 \
   --seed 0
 ```
 
-`--samples` sets the number of candidate sizings returned in NRBO mode. Weighted mode
-requires the targets corresponding to nonzero weights; `--max-power-w` also requires a
-trained `power_w` target. The search implementation is local to this project
-and uses numerical gradients/curvature plus population diversity; it is not a drop-in
-implementation of every published NRBO variant. `--neighbors-per-candidate` optionally
-adds local sizings to the same evaluation batch. qNEHVI/MOBO is not currently implemented.
-
-The NRBO run writes `candidates.csv`/`candidates.json` and the usual `results.csv`/`results.json`.
-Append the measured results to the training dataset and retrain:
+## Run SAC + NRBO
 
 ```bash
-python3 collect_data.py \
-  --netlist netlists/strongarm/ \
-  --from-results run/strongarm/<nrbo-run-id>/results.json \
-  --output dataset/data.csv \
-  --append
-
-python3 train_surrogate.py \
-  --dataset dataset/strongarm/data.csv \
-  --method gpr \
-  --targets delay_s,power_w \
-  --output model.pkl
+python3 optimize_sizing.py \
+  --runner ngspice \
+  --netlist netlists/strongarm_2ghz/ \
+  --algorithm SAC \
+  --samples 5 \
+  --population-size 4 \
+  --workers 1 \
+  --rl-timesteps 64 \
+  --episode-length 8 \
+  --seed 0
 ```
 
-Use `--algorithm verify --candidates <path>` only when you want to run a previously saved
-candidate file in a separate invocation.
+PPO is on-policy; SAC is off-policy. Both learn operator controls from measured reward:
+the weighted candidate-score improvement and the fraction of feasible candidates. Score
+objective/sentinel, weights, metric references, constraints, and penalty parameters are configured
+in `netlists/<design>/scoring.yaml`; no objective or weight flags are accepted by the CLI.
 
-The netlist directory name forms the circuit folder under `run/`; each run uses a numeric
-UTC timestamp as the default run ID, for example
-`run/strongarm/20261118150023990787/`. Choose `--run-id` to set the child folder explicitly;
-existing non-empty output directories are never overwritten. `--algorithm` supports `halton`,
-`random`, `lhs`, `sobol`, `nrbo`, and `verify`;
-`nrbo` requires `--model`, while `verify` requires `--candidates`. `--samples`, `--seed`,
-and `--timeout-s` control the run.
+### Score configuration
 
-Use `-v` for progress and metrics, `-vv` for sizing and simulator-command details, and
-`-vvv` for generated deck contents and ngspice logs.
+For a design, editable score settings, weights, references, constraints, and penalty parameters
+are stored in `netlists/<design>/scoring.yaml`. The StrongARM baseline is:
 
-For each sampled W/L design, a sample folder contains a sizing JSON, a generated transient
-deck and waveform, ngspice log, and—when enabled by the design config—an AC gain deck,
-waveform, and log. It also contains a `result.json`. The run folder contains `results.csv`,
-the copied sizing config, and `results.json` with the run name and all sample records.
-The `netlists/<design>/sizing.yaml` file is the editable source config; the run-folder copy
-is a snapshot of the exact settings used for that run, so results remain reproducible if
-the source config changes later.
+```yaml
+scoring:
+  objective: minimize
+  infeasible_score: 1000.0
 
-Each sample JSON includes a `name`, a `size` dictionary, normalized vector, extracted
-metrics, status, and paths to generated files. Failed analyses remain recorded with an
-error instead of being treated as valid results. Offset and kickback fields are only
-present when the selected netlist config supplies those analysis recipes.
+weights:
+  delay: 1.0
+  power: 0.5
+  energy: 0.5
+  offset: 1.0
+  noise: 0.5
+  kickback: 1.0
 
-For a different circuit, add `netlists/<design>/netlist.spice` and a matching
-`netlists/<design>/sizing.yaml`; no StrongARM paths or transistor labels are required by the
-optimizer itself.
+references:
+  delay_s: 2.0e-10
+  power_w: 5.0e-4
+  energy_j: 1.0e-13
+  offset_v: 5.0e-3
+  noise_v: 5.0e-4
+  kickback_v: 2.0e-2
+
+constraints:
+  max_delay_s: 3.0e-10
+  max_power_w: 5.0e-4
+  max_offset_v: 1.0e-2
+  max_noise_v: 1.0e-3
+  max_kickback_v: 2.0e-2
+  min_output_swing_v: 1.5
+
+penalty:
+  lambda: 100.0
+  type: quadratic
+```
+
+The score is read only from `netlists/<design>/scoring.yaml`. A snapshot of the active
+scoring configuration is saved to `run/<design>/<run-id>/scoring.yaml`.
+
+### Score formula
+
+The NRBO candidate score $S_{\text{total}}$ is minimized ($\min S_{\text{total}}$). There is no
+fixed initial or final score range; it depends on the selected units, weights, and penalties. The
+implementation uses:
+
+$$
+\begin{aligned}
+S_{\text{total}} = {}&
+w_d \frac{t_d}{t_{d,\text{ref}}}
++ w_p \frac{P}{P_{\text{ref}}}
++ w_e \frac{E}{E_{\text{ref}}} \\
+&+ w_o \frac{|V_{\text{offset}}|}{V_{\text{offset,ref}}}
++ w_n \frac{V_{\text{noise}}}{V_{\text{noise,ref}}}
++ w_k \frac{V_{\text{kickback}}}{V_{\text{kickback,ref}}} \\
+&+ \lambda \left( g_P^2 + g_d^2 + g_O^2 + g_N^2 + g_K^2 + g_S^2 \right)
+\end{aligned}
+$$
+
+where $t_d$ is delay, $P$ is power,
+$E$ is energy per comparison, $V_{\text{offset}}$ is input-referred offset, $V_{\text{noise}}$
+is input-referred noise, $V_{\text{kickback}}$ is kickback noise, and $V_{\text{swing}}$ is
+output swing. All references (including $t_{d,\text{ref}}$ from `references.delay_s`), weights,
+constraints, and $\lambda$ come from `scoring.yaml`. The normalized constraint violations are:
+
+$$
+g_P = \max\left(0, \frac{P}{P_{\max}} - 1\right), \quad
+g_d = \max\left(0, \frac{t_d}{t_{d,\max}} - 1\right), \quad
+g_O = \max\left(0, \frac{|V_{\text{offset}}|}{V_{\text{offset,max}}} - 1\right)
+$$
+
+$$
+g_N = \max\left(0, \frac{V_{\text{noise}}}{V_{\text{noise,max}}} - 1\right), \quad
+g_K = \max\left(0, \frac{V_{\text{kickback}}}{V_{\text{kickback,max}}} - 1\right), \quad
+g_S = \max\left(0, \frac{V_{\text{swing,min}} - V_{\text{swing}}}{V_{\text{swing,min}}}\right)
+$$
+
+Single-objective CLI selection has been removed. Every candidate is scored from the
+weighted terms and constraints in `scoring.yaml`; set the weights and limits to balance the
+desired metrics. Transient comparator failures receive a smooth graded penalty in
+$[0.5 \cdot S_{\text{infeasible}},\, S_{\text{infeasible}}]$ based on how close $|V_X - V_Y|$
+and reset recovery came to their thresholds (providing a continuous gradient into the switching
+region), while hard simulator crashes receive `scoring.infeasible_score` (default $1000.0$).
+Candidates violating any configured constraint are marked infeasible, incur the quadratic (or
+linear) penalty scaled by $\lambda$, record human-readable reasons in `constraint_violations`,
+and are sorted after feasible candidates in `candidates.csv`.
+
+The RL reward is separate from the candidate score:
+
+$$
+R=2\tanh\left(\frac{S_{previous}-S_{best}}{|S_{initial}|+10^{-6}}\right)
++0.05F-0.01
+$$
+
+where $F$ is the fraction of the population that satisfies all configured constraints and
+$S_{previous}-S_{best}$ is improvement in the candidate score. With the current reward
+constants, $R$ is approximately in $[-0.01,2.04]$, while candidate scores have no fixed
+bounded range.
+
+Measured targets collected in a single unified `netlist.spice` simulation per candidate
+include `delay_s`, `speed_hz`, `power_w`, `energy_per_comparison_j`,
+`dc_gain_v_per_v`, `bandwidth_3db_hz`, `input_referred_offset_v`,
+`input_referred_noise_v`, and `kickback_noise_v`. The mock runner produces synthetic
+values with the same metric schema for fast pipeline smoke tests.
+
+Use `-v` for start, candidate-evaluation, checkpoint, ranking, and completion INFO logs.
+Use `-vv` for additional DEBUG details supported by the workflow. `-v` does not change
+how many samples are evaluated.
+
+Default run IDs use `run_YYYY_MM_DD_HH_MM`, for example
+`run/strongarm/run_2026_11_20_17_07/`. Passing `--run-id test` creates
+`run/strongarm/run_test/`; passing `--run-id run_test` does not add a duplicate prefix.
+
+Each RL environment transition evaluates a population with SPICE. PPO/SAC rollout collection
+can therefore require many simulator calls: increasing `--population-size`,
+`--rl-timesteps`, or `--episode-length` increases runtime and simulation count. Start with
+small values to validate a design setup.
+
+Use `--workers N` (default `1`) to evaluate uncached candidates within each NRBO generation in
+parallel while preserving deterministic sample numbering, ordering, and scoring. Setting
+`--workers` up to `--population-size` (e.g., `--workers 4` for `--population-size 4`, subject to
+available CPU cores) parallelizes all simulations in each reset and step generation; values above
+`--population-size` provide no additional speedup.
+
+Use `--keep N` (e.g., `--keep 50`) to prune per-evaluation folders under `data/sample_XXXXXX/`
+during long runs, keeping raw SPICE decks and waveforms on disk **only for the `N` best
+candidates** (default keeps all; `--keep 0` removes all sample folders). All measured metrics,
+sizes, and scores remain in `results.csv`, and all plotting scripts including Plot 6 transient
+waveforms continue to work as long as `N >= --top-k`.
+
+Use `-v` to print start, candidate evaluation (`Evaluated X/Total`), checkpoint, ranking, and
+completion progress. Use `-vv` to add resolved scoring configuration and score-config path details.
+Default run IDs use `run_YYYY_MM_DD_HH_MM`; for example:
+`run/strongarm_5ghz/run_2026_11_20_17_07/`. A custom `--run-id test` becomes `run_test`; a
+custom value already starting with `run_` is not prefixed again.
+
+The run directory contains `candidates.csv`, `results.csv`, the sizing and scoring config
+snapshots, `checkpoints/`, and per-evaluation sample folders (`sample_XXXXXX/` containing decks,
+logs, waveforms, and metrics) under `data/`. `results.csv` and `candidates.csv` record `sample`,
+`algorithm`, `iteration`, `seed`, `status`, individual design W/L columns parsed from
+`sizing.yaml` (`w_in`, `l_in`, `w_n`, `w_p`, `w_rst`, `w_tail`, `w_8`, `l_8`), extracted metrics
+(including `voh_v`, `vol_v`, `overshoot_v`, `ac_freq_points`), `rl_objective_score`,
+`rl_feasible`, `constraint_violations`, and `error`. Candidate rankings are based on direct
+simulator measurements, not surrogate predictions.
+
+## Post-Search Validation (Top-K Candidates)
+
+Validate the top-K candidates of a completed run across small-input overdrive (`±1/5/10/100 mV`),
+PVT corners (`tt, ff, ss, sf, fs` × `0/27/85 °C` × `VDD ± 10%`), and Monte-Carlo transient
+mismatch offset bisection:
+
+```bash
+python3 scripts/validate_candidates.py \
+  --output-dir run/strongarm_5ghz/<run-id> \
+  --top-k 5 \
+  --workers 8 \
+  --mc-samples 16
+```
+
+Validation CSVs (`validation_summary.csv`, `small_input_delay.csv`, `pvt_corners.csv`,
+`monte_carlo_offset.csv`) are written to `run/<design>/<run-id>/validation/`. Add `--fast` for a
+quick 5-extreme-corner check.
+
+## Plotting Results
+
+Standalone plotting scripts live under `plot/` (one script per plot, plus `plot/plot.py` to
+generate all standard plots together):
+
+- `plot/plot_objective_score.py` — Plot 1: Objective Score vs. Evaluation Number
+- `plot/plot_feasibility_rate.py` — Plot 2: Feasibility Rate vs. Evaluation Number
+- `plot/plot_power_vs_delay.py` — Plot 3: Power vs. Delay (with feasible Pareto front)
+- `plot/plot_offset_vs_noise.py` — Plot 4: Offset vs. Noise (with feasible Pareto front)
+- `plot/plot_kickback_vs_noise.py` — Plot 5: Kickback vs. Input-Referred Noise (with feasible Pareto front)
+- `plot/plot_transient_waveforms.py` — Plot 6: Transient Waveforms for Top-K Best Candidates (default `--top-k 5`)
+
+Generate a single plot or all plots from one or more run output directories:
+
+```bash
+python3 plot/plot_objective_score.py --output-dir run/strongarm_5ghz/<run-id>
+python3 plot/plot_transient_waveforms.py --output-dir run/strongarm_5ghz/<run-id> --top-k 5
+python3 plot/plot.py --output-dir run/strongarm_5ghz/<run-id>
+```
+
+Compare multiple runs (e.g., PPO vs. SAC or multiple seeds) on the same axes by passing multiple
+run directories:
+
+```bash
+python3 plot/plot.py \
+  --output-dir run/strongarm_5ghz/<ppo-run> run/strongarm_5ghz/<sac-run>
+```
+
+By default, PNGs are saved outside `run/` into the workspace directory:
+
+```text
+plot_<algorithm>_seed_<seed>_iteration_<iteration>_<run-time-id>/
+```
+
+Use `-o/--save-path` (for individual scripts) or `-o/--plot-dir` (for `plot/plot.py` and
+`plot/plot_transient_waveforms.py`) to override where PNGs are saved, `--dpi` to adjust
+resolution, and `--show` to open an interactive window.
+
+## Resume a checkpoint
+
+Each run stores controller checkpoints beneath:
+
+```text
+run/<design>/<run-id>/checkpoints/
+  PPO/
+    model.zip
+  SAC/
+    model.zip
+    replay_buffer.pkl
+```
+
+Resume a run by run ID or full path:
+
+```bash
+python3 optimize_sizing.py \
+  --runner ngspice \
+  --netlist netlists/strongarm_2ghz/ \
+  --algorithm PPO \
+  --resume run_resume_smoke \
+  --rl-timesteps 64 \
+  --episode-length 8 \
+  --seed 102
+```
+
+The run ID and algorithm must match the existing run. Resume continues in the same run
+folder, retains existing measurements, continues sample numbering, and replaces the
+controller checkpoint after further training.
+
+For a pipeline smoke test without ngspice, use the synthetic mock runner:
+
+```bash
+python3 optimize_sizing.py \
+  --runner mock \
+  --netlist netlists/strongarm_2ghz/ \
+  --algorithm PPO \
+  --samples 3 \
+  --population-size 4 \
+  --rl-timesteps 64 \
+  --episode-length 4 \
+  --seed 0
+```
+
+Mock metrics are synthetic and are only for checking the RL/search/dataflow. This branch
+supports PPO and SAC with NRBO; standalone NRBO, supervised regression, MBPO, GRPO, and
+other RL controllers are not implemented.

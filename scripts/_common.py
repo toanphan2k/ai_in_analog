@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Mapping
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-SIZING_CONFIG = PROJECT_DIR / "netlists" / "strongarm" / "sizing.yaml"
+SIZING_CONFIG = PROJECT_DIR / "netlists" / "strongarm_2ghz" / "sizing.yaml"
 
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
